@@ -1,0 +1,11 @@
+argument: a value holds a NUL byte (\0); a command argument, variable or file name cannot
+in a word: a value holds a NUL byte (\0); a command argument, variable or file name cannot
+array element: a value holds a NUL byte (\0); a command argument, variable or file name cannot
+variable value: a value holds a NUL byte (\0); a command argument, variable or file name cannot
+redirect target: a value holds a NUL byte (\0); a command argument, variable or file name cannot
+system: a value holds a NUL byte (\0); a command argument, variable or file name cannot
+Rsh.run: a value holds a NUL byte (\0); a command argument, variable or file name cannot
+ENV: ArgumentError
+no file made
+0000000   a  \0   b  \n
+status: 0

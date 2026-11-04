@@ -30,6 +30,12 @@ const char* const RUBY_WORDS[] = {
     "singleton_class", "method", "rsh_methods",
     // conversions every object has, called without a receiver inside methods
     "to_a", "to_s", "to_h", "to_i", "to_f", "to_sym", "to_proc", "inspect", "dup", "clone", "instance_variables",
+    // 0.1.3: the rest of the built-in interpreter's Kernel functions (audit M1). `open "x"` opens a
+    // file, it never runs a program called open. `sleep` stays a command (`sleep 5 &`).
+    "open", "putc", "readline", "readlines", "__dir__", "__callee__", "global_variables", "local_variables",
+    "usleep", "tap", "itself", "object_id", "enum_for", "to_enum", "yield_self", "methods", "singleton_methods",
+    "public_methods", "private_methods", "protected_methods", "remove_instance_variable", "singleton_method",
+    // From 0.1.3 the list is frozen (docs/STABILITY.md, tests/contract.sh): it only grows, in a major version.
     nullptr};
 
 static const char* const KEYWORDS[] = {

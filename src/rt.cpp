@@ -130,6 +130,9 @@ mrb_value m_exec(mrb_state* mrb, mrb_value) {
     mrb_int idx, flags;
     mrb_value vals;
     mrb_get_args(mrb, "iAi", &idx, &vals, &flags);
+    // A `source` or `Rsh.eval` run by this line reuses this call's argument slots; the values (and
+    // the Ruby stages in them) must stay alive for the rest of the line.
+    mrb_gc_protect(mrb, vals);
     mrb_value result = mrb_nil_value(), errmsg = mrb_nil_value(), exc = mrb_nil_value();
     if (idx < 0 || size_t(idx) >= table().size()) mrb_raise(mrb, E_ARGUMENT_ERROR, "no such command line");
     mrb_value saved = host.vals;
@@ -157,7 +160,7 @@ mrb_value m_exec(mrb_state* mrb, mrb_value) {
         Outcome oc = run(int(idx), vs, host, o);
         host.vals = saved;
         if (oc.ruby_error) exc = host.exc;
-        else if (!oc.error.empty()) errmsg = str(mrb, table()[size_t(idx)].text.empty() ? oc.error : oc.error);
+        else if (!oc.error.empty()) errmsg = str(mrb, oc.error);
         else result = outcome(mrb, oc);
     }
     if (!mrb_nil_p(exc)) {
@@ -214,8 +217,10 @@ mrb_value m_chdir(mrb_state* mrb, mrb_value) {
     const char* d;
     mrb_get_args(mrb, "z", &d);
     if (chdir(d) != 0) mrb_raisef(mrb, E_RUNTIME_ERROR, "cd %s: %s", d, std::strerror(errno));
-    char now[4096];
-    if (getcwd(now, sizeof now)) setenv("PWD", now, 1);
+    {
+        std::string now = current_dir();
+        if (!now.empty()) setenv("PWD", now.c_str(), 1);
+    }
     return mrb_nil_value();
 }
 
@@ -288,16 +293,45 @@ mrb_value m_file_mtime(mrb_state* mrb, mrb_value) {
                        mrb_int_value(mrb, (mrb_int)(st.st_mtim.tv_nsec / 1000)));
 }
 
+// IO.popen and IO._popen: the interpreter's version runs its text with /bin/sh. rsh never hands
+// text to a shell (audit C2), so these only say what to write instead. The interpreter is also
+// built without popen (build_config.rb), so no code that could do it is in the program.
+mrb_value m_no_shell(mrb_state* mrb, mrb_value) {
+    raise_with(mrb, mrb_class_get_under(mrb, rsh_mod(mrb), "Error"),
+               mrb_str_new_lit(mrb, "IO.popen would run its text with /bin/sh, which rsh never does; write the command line itself, "
+                                    "`cmd args` for its output, or system(\"prog\", \"arg\")"));
+    return mrb_nil_value();
+}
+
+// Rsh.__home(user): the home folder of `user` from /etc/passwd, or nil (File.expand_path("~user")
+// without the account database of the C library, audit L6).
+mrb_value m_home(mrb_state* mrb, mrb_value) {
+    const char* u;
+    mrb_get_args(mrb, "z", &u);
+    mrb_value r = mrb_nil_value();
+    {
+        std::string h = *u ? home_of(u) : "";
+        if (!h.empty()) r = str(mrb, h);
+    }
+    return r;
+}
+
 mrb_value m_glob(mrb_state* mrb, mrb_value) {
     const char* p;
     mrb_get_args(mrb, "z", &p);
     mrb_value r = mrb_ary_new(mrb);
+    bool too_many = false;
     {
         std::vector<std::string> all;
-        for (auto& b : brace_expand(p))
-            for (auto& m : glob(b)) all.push_back(m);
+        std::vector<std::string> alts = brace_expand(p, &too_many);
+        if (!too_many)
+            for (auto& b : alts)
+                for (auto& m : glob(b)) all.push_back(m);
         for (auto& m : all) mrb_ary_push(mrb, r, str(mrb, m));
     }
+    if (too_many)
+        mrb_raisef(mrb, mrb_class_get_under(mrb, rsh_mod(mrb), "Error"), "a {a,b} pattern gives more than %d words",
+                   (int)BRACE_LIMIT);
     return r;
 }
 
@@ -318,6 +352,25 @@ bool ends_with(const std::string& s, const char* t) {
 std::set<std::string>& script_methods() {
     static std::set<std::string> m;
     return m;
+}
+
+// Runs compiled text under a protect: inside a running script (require_relative, source, Rsh.eval)
+// an exception would otherwise jump past the caller's clean-up, which leaked the compile context
+// (audit M8) and left the file list wrong. The exception, if any, is left in mrb->exc.
+struct LoadCall {
+    mrb_value code;
+    mrb_ccontext* c;
+};
+mrb_value load_body(mrb_state* mrb, void* ud) {
+    auto* l = static_cast<LoadCall*>(ud);
+    return mrb_load_nstring_cxt(mrb, RSTRING_PTR(l->code), RSTRING_LEN(l->code), l->c);
+}
+mrb_value load_protected(mrb_state* mrb, mrb_value code, mrb_ccontext* c) {
+    LoadCall l{code, c};
+    mrb_bool err = FALSE;
+    mrb_value v = mrb_protect_error(mrb, load_body, &l, &err);
+    if (err && mrb_obj_ptr(v)) mrb->exc = mrb_obj_ptr(v);
+    return err ? mrb_nil_value() : v;
 }
 
 // Compiles and runs `src` as file `file` at the top level; leaves an exception in mrb->exc.
@@ -344,7 +397,7 @@ void load_text(mrb_state* mrb, const std::string& src, const std::string& file, 
     c->capture_errors = TRUE;
     int ai = mrb_gc_arena_save(mrb);
     host.files.push_back(file);
-    mrb_load_nstring_cxt(mrb, RSTRING_PTR(code), RSTRING_LEN(code), c);
+    load_protected(mrb, code, c);
     host.files.pop_back();
     mrb_gc_arena_restore(mrb, ai);
     mrb_ccontext_free(mrb, c);
@@ -441,7 +494,7 @@ mrb_value m_load(mrb_state* mrb, mrb_value) {
     mrb_ccontext_filename(mrb, c, file);
     c->lineno = uint16_t(line);
     c->capture_errors = TRUE;
-    mrb_value v = mrb_load_nstring_cxt(mrb, RSTRING_PTR(code), RSTRING_LEN(code), c);
+    mrb_value v = load_protected(mrb, code, c);
     mrb_ccontext_free(mrb, c);
     if (mrb->exc) {
         mrb_value e = mrb_obj_value(mrb->exc);
@@ -462,6 +515,8 @@ mrb_value m_declare(mrb_state* mrb, mrb_value) {
     return mrb_nil_value();
 }
 
+int report(mrb_state* mrb, mrb_value exc);
+
 int RtHost::source(const std::vector<std::string>& a) {
     if (a.size() < 2) {
         std::fprintf(stderr, "rsh: source needs a file\n");
@@ -476,10 +531,11 @@ int RtHost::source(const std::vector<std::string>& a) {
     bool syn;
     load_text(mrb, body, a[1], wants_shell_layer(a[1], body), syn);
     if (syn) return 2;
-    if (mrb->exc) {  // reported here; the command line itself only fails
-        mrb_print_error(mrb);
+    if (mrb->exc) {  // reported here, as `rsh: FILE:LINE: message (Class)`; the command line only fails
+        mrb_value e = mrb_obj_value(mrb->exc);
         mrb->exc = nullptr;
-        return 1;
+        int st = report(mrb, e);
+        return st ? st : 1;
     }
     return 0;
 }
@@ -544,9 +600,13 @@ mrb_value m_regexp(mrb_state* mrb, mrb_value) {
 }
 
 mrb_value m_re_init(mrb_state* mrb, mrb_value self) {
-    m_regexp(mrb, self);
+    // The arguments first: running the Regexp side's code from here reuses this call's argument
+    // slots (the interpreter's rule for code run from a C function), so they are read before.
     mrb_value src, opt = mrb_nil_value();
     mrb_get_args(mrb, "o|o", &src, &opt);
+    mrb_gc_protect(mrb, src);
+    mrb_gc_protect(mrb, opt);
+    m_regexp(mrb, self);
     if (mrb_obj_is_kind_of(mrb, src, mrb_class_get(mrb, "Regexp"))) {
         opt = mrb_iv_get(mrb, src, mrb_intern_lit(mrb, "@options"));
         src = mrb_iv_get(mrb, src, mrb_intern_lit(mrb, "@source"));
@@ -585,6 +645,23 @@ mrb_value m_re_init(mrb_state* mrb, mrb_value self) {
     return self;
 }
 
+// One match context for every match: a pattern from input (Regexp.new(text)) gets at most this
+// much work per call, then RegexpError (audit M7). The engine's own default match limit is 10 times
+// more (about 0.1 s per call); its heap limit 20 GB. No JIT.
+constexpr uint32_t MATCH_LIMIT = 1000000, DEPTH_LIMIT = 1000000, HEAP_LIMIT_KIB = 262144;  // 256 MB of backtracking
+pcre2_match_context* match_context() {
+    static pcre2_match_context* cx = nullptr;
+    if (!cx) {
+        cx = pcre2_match_context_create(nullptr);
+        if (cx) {
+            pcre2_set_match_limit(cx, MATCH_LIMIT);
+            pcre2_set_depth_limit(cx, DEPTH_LIMIT);
+            pcre2_set_heap_limit(cx, HEAP_LIMIT_KIB);
+        }
+    }
+    return cx;
+}
+
 Re* get_re(mrb_state* mrb, mrb_value self) {
     Re* re = static_cast<Re*>(mrb_data_get_ptr(mrb, self, &re_type));
     if (!re || !re->code) mrb_raise(mrb, E_TYPE_ERROR, "uninitialized Regexp");
@@ -599,9 +676,12 @@ mrb_value m_re_match(mrb_state* mrb, mrb_value self) {
     Re* re = get_re(mrb, self);
     if (pos < 0 || pos > RSTRING_LEN(s)) return mrb_nil_value();
     int rc = pcre2_match(re->code, reinterpret_cast<PCRE2_SPTR>(RSTRING_PTR(s)), size_t(RSTRING_LEN(s)), size_t(pos), 0,
-                         re->md, nullptr);
+                         re->md, match_context());
     if (rc < 0) {
         if (rc == PCRE2_ERROR_NOMATCH) return mrb_nil_value();
+        if (rc == PCRE2_ERROR_MATCHLIMIT || rc == PCRE2_ERROR_DEPTHLIMIT || rc == PCRE2_ERROR_HEAPLIMIT)
+            mrb_raise(mrb, mrb_class_get(mrb, "RegexpError"),
+                      "the pattern is too complex for this text (it needs more than the match limit); make it simpler");
         PCRE2_UCHAR buf[256];
         pcre2_get_error_message(rc, buf, sizeof buf);
         mrb_raisef(mrb, E_RUNTIME_ERROR, "pattern match failed: %s", reinterpret_cast<char*>(buf));
@@ -982,6 +1062,7 @@ mrb_state* rt_open(const std::string& script, const std::vector<std::string>& ar
     mrb_define_module_function(mrb, r, "__load", m_load, MRB_ARGS_REQ(3));
     mrb_define_module_function(mrb, r, "__declare", m_declare, MRB_ARGS_REQ(1));
     mrb_define_module_function(mrb, r, "__regexp", m_regexp, MRB_ARGS_NONE());
+    mrb_define_module_function(mrb, r, "__home", m_home, MRB_ARGS_REQ(1));
     mrb_define_class_method(mrb, mrb_class_get(mrb, "File"), "mtime", m_file_mtime, MRB_ARGS_REQ(1));
     RClass* re = mrb_define_class(mrb, "Regexp", mrb->object_class);
     MRB_SET_INSTANCE_TT(re, MRB_TT_CDATA);
@@ -996,6 +1077,9 @@ mrb_state* rt_open(const std::string& script, const std::vector<std::string>& ar
         mrb_print_error(mrb);
         return nullptr;
     }
+    RClass* io = mrb_class_get(mrb, "IO");
+    mrb_define_class_method(mrb, io, "popen", m_no_shell, MRB_ARGS_ANY());
+    mrb_define_class_method(mrb, io, "_popen", m_no_shell, MRB_ARGS_ANY());
     mrb_value av = mrb_ary_new(mrb);
     for (auto& a : args) mrb_ary_push(mrb, av, str(mrb, a));
     mrb_define_global_const(mrb, "ARGV", av);
@@ -1147,6 +1231,13 @@ int rt_check(mrb_state* mrb, const std::string& src, const std::string& file, bo
                     name[0] != '/' && name[0] != '~') {
                     std::fprintf(stderr, "%s:%d: warning: `%s` is taken as a command and is not on PATH; if it is a Ruby method, write %s(...) or declare it with rsh_methods :%s\n",
                                  file.c_str(), L.line, name.c_str(), name.c_str(), name.c_str());
+                    ++warn;
+                }
+                // A value as the first argument of a program: "-rf" in it is an option (audit M2).
+                if (plain && !name.empty() && !is_builtin(name) && cmd.words.size() > 1 && !cmd.words[1].parts.empty() &&
+                    (cmd.words[1].parts[0].k == Part::Val || cmd.words[1].parts[0].k == Part::Env)) {
+                    std::fprintf(stderr, "%s:%d: warning: a value is the first argument of %s; if it starts with - it is read as an option: write %s -- #{...}\n",
+                                 file.c_str(), L.line, name.c_str(), name.c_str());
                     ++warn;
                 }
                 bool shell_c = (name == "sh" || name == "bash" || name == "zsh") && cmd.words.size() > 1;

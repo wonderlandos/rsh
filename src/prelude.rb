@@ -160,6 +160,22 @@ module Kernel
     raise Rsh::Error, "this capture was built at run time; write it in the script as `...` so values stay single arguments"
   end
 
+  # open(name): a file, never a program. The interpreter's open("|cmd") would run cmd with /bin/sh,
+  # so a name from input that starts with "|" could run anything; rsh refuses it.
+  private def open(file, *rest, &block)
+    raise ArgumentError, "open takes a file name (a String)" unless file.is_a?(String)
+    if file.start_with?("|")
+      raise Rsh::Error, "open(\"|...\") would run the text with /bin/sh, which rsh never does; write the command line itself, or `cmd args` for its output"
+    end
+    File.open(file, *rest, &block)
+  end
+
+  # __dir__: the folder of the file this call is written in (absolute), as in Ruby.
+  def __dir__
+    f = caller(0, 1)[0].to_s.split(":")[0]
+    f.nil? || f.empty? || f.start_with?("(") || f == "-" || f == "-c" ? nil : File.dirname(File.expand_path(f))
+  end
+
   # rsh_methods :deploy, :restart: these bare words are Ruby method calls, not commands (methods a
   # script makes at run time, with method_missing or define_method over a list). The reader sees
   # the literal names in the file; at run time the call only adds them for Rsh.eval texts.
@@ -205,6 +221,25 @@ module Kernel
 end
 
 class File
+  class << self
+    alias __rsh_expand_path expand_path
+
+    # "~user" from /etc/passwd, as rsh's command lines do; the interpreter's own lookup would load
+    # the C library's account modules into a static program.
+    def expand_path(path, dir = nil)
+      path = __rsh_tilde(path.to_s)
+      dir.nil? ? __rsh_expand_path(path) : __rsh_expand_path(path, __rsh_tilde(dir.to_s))
+    end
+
+    def __rsh_tilde(path)
+      return path unless path.start_with?("~") && path.size > 1 && path[1] != "/"
+      user, rest = path[1..].split("/", 2)
+      home = Rsh.__home(user)
+      raise ArgumentError, "user #{user} doesn't exist" unless home
+      rest ? "#{home}/#{rest}" : home
+    end
+  end
+
   def self.write(path, data, *_opts)
     text = data.to_s
     File.open(path.to_s, "w") { |f| f.write(text) }

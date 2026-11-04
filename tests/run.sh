@@ -52,7 +52,9 @@ run_one() { # dir name ext [script] -> writes $tmp/got.out
 		if [ -f "$here/$dir/$name.setup" ]; then
 			env -i PATH="$PATH" LC_ALL=C sh "$here/$dir/$name.setup" || exit 99
 		fi
+		# The sanitizer settings of `make test` (Makefile ASAN_ENV) pass through; nothing else does.
 		env -i PATH="$path" HOME="$work/home" LC_ALL=C TERM=dumb USER=tester RSH_TESTS="$here" \
+			${ASAN_OPTIONS:+ASAN_OPTIONS="$ASAN_OPTIONS"} ${UBSAN_OPTIONS:+UBSAN_OPTIONS="$UBSAN_OPTIONS"} \
 			"$rsh" "$script" "$@" 2>"$tmp/got.err" >"$tmp/got.body"
 		echo "status: $?" >>"$tmp/got.body"
 	)

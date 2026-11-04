@@ -41,7 +41,10 @@ bool glob_has_meta(const std::string& p) {
     return false;
 }
 
-std::vector<std::string> brace_expand(const std::string& p) {
+namespace {
+
+void brace_into(const std::string& p, std::vector<std::string>& out, bool& over) {
+    if (over) return;
     for (size_t i = 0; i < p.size(); ++i) {
         if (p[i] == '\\') {
             ++i;
@@ -65,19 +68,33 @@ std::vector<std::string> brace_expand(const std::string& p) {
                 --depth;
             } else if (p[j] == ',' && depth == 0) commas.push_back(j);
         }
-        if (close == std::string::npos) return {p};
+        if (close == std::string::npos) break;
         if (commas.empty()) continue;
         std::string pre = p.substr(0, i), post = p.substr(close + 1);
-        std::vector<std::string> out;
         size_t b = i + 1;
         commas.push_back(close);
         for (size_t c : commas) {
-            for (auto& e : brace_expand(pre + p.substr(b, c - b) + post)) out.push_back(e);
+            brace_into(pre + p.substr(b, c - b) + post, out, over);
+            if (over) return;
             b = c + 1;
         }
-        return out;
+        return;
     }
-    return {p};
+    if (out.size() >= BRACE_LIMIT) {
+        over = true;
+        return;
+    }
+    out.push_back(p);
+}
+
+}  // namespace
+
+std::vector<std::string> brace_expand(const std::string& p, bool* too_many) {
+    std::vector<std::string> out;
+    bool over = false;
+    brace_into(p, out, over);
+    if (too_many) *too_many = over;
+    return out;
 }
 
 bool glob_match(const std::string& pat, const std::string& name) {
@@ -113,7 +130,11 @@ void walk(const std::string& base, const std::vector<std::string>& segs, size_t 
         while (dirent* e = readdir(d)) {
             if (e->d_name[0] == '.') continue;
             std::string path = join(base, e->d_name);
-            if (e->d_type == DT_DIR || (e->d_type == DT_UNKNOWN && is_dir(path, nullptr))) subs.push_back(path);
+            // ** never follows a symbolic link, also where the file system gives no d_type: a
+            // link to a parent folder would recurse without end (audit L2).
+            struct stat st;
+            if (e->d_type == DT_DIR || (e->d_type == DT_UNKNOWN && lstat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)))
+                subs.push_back(path);
         }
         closedir(d);
         for (auto& s : subs) walk(s, segs, k, out);

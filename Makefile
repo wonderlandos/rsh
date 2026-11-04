@@ -21,20 +21,23 @@ M      = build/mruby
 MLIB   = $(M)/build/rsh/lib/libmruby.a
 OPT ?= -Os
 CXXFLAGS += $(OPT) -std=c++20 -Wall -Wextra -Werror -fno-exceptions -fno-rtti -fno-threadsafe-statics -ffunction-sections \
-	-fdata-sections -I$(M)/include -I$(M)/build/rsh/include -DMRB_UTF8_STRING -DMRB_STR_LENGTH_MAX=0 -DRSH_VERSION='"$(VERSION)"'
+	-fdata-sections -I$(M)/include -I$(M)/build/rsh/include -DMRB_UTF8_STRING -DMRB_STR_LENGTH_MAX=0 -DMRB_ARY_LENGTH_MAX=0 -DRSH_VERSION='"$(VERSION)"'
 PCRE   = $(shell pkg-config --cflags libpcre2-8 2>/dev/null) -DPCRE2_CODE_UNIT_WIDTH=8
 ifeq ($(LINK),static)
 LDFLAGS += -static
 endif
-LDFLAGS += -static-libstdc++ -static-libgcc -Wl,--gc-sections -s
+STRIP ?= -s
+LDFLAGS += -static-libstdc++ -static-libgcc -Wl,--gc-sections $(STRIP)
 LIBS    = -lpcre2-8 -lm
+# Where a build goes: build/ for the program, build/asan/ for the sanitizer build (make asan).
+OUT ?= build
 
 SRC  = $(wildcard src/*.cpp)
 MRBC = $(M)/build/rsh/bin/mrbc
-OBJ  = $(SRC:src/%.cpp=build/obj/%.o)
-LIBOBJ = $(filter-out build/obj/main.o,$(OBJ))
+OBJ  = $(SRC:src/%.cpp=$(OUT)/obj/%.o)
+LIBOBJ = $(filter-out $(OUT)/obj/main.o,$(OBJ))
 
-all: build/rsh
+all: $(OUT)/rsh
 
 $(MRUBY_TARBALL):
 	mkdir -p build
@@ -50,8 +53,8 @@ build/mruby/.ok: $(MRUBY_TARBALL) build_config.rb
 $(MLIB): build/mruby/.ok
 	cd $(M) && MRUBY_CONFIG=$(CURDIR)/build_config.rb ruby ./minirake -j8 all >/dev/null
 
-build/obj/%.o: src/%.cpp $(wildcard src/*.hpp) $(MLIB)
-	@mkdir -p build/obj
+$(OUT)/obj/%.o: src/%.cpp $(wildcard src/*.hpp) $(MLIB) VERSION
+	@mkdir -p $(OUT)/obj
 	$(CXX) $(CXXFLAGS) $(PCRE) -c $< -o $@
 
 # The Ruby half of rsh, compiled to bytecode and linked in (no parsing at start-up).
@@ -62,27 +65,48 @@ build/prelude.c: src/prelude.rb $(MLIB)
 build/prelude_regexp.c: src/prelude_regexp.rb $(MLIB)
 	$(MRBC) -Brsh_prelude_regexp -o $@ src/prelude_regexp.rb
 
-build/obj/prelude.o: build/prelude.c
-	@mkdir -p build/obj
+$(OUT)/obj/prelude.o: build/prelude.c
+	@mkdir -p $(OUT)/obj
 	$(CC) -Os -I$(M)/include -I$(M)/build/rsh/include -c $< -o $@
 
-build/obj/prelude_regexp.o: build/prelude_regexp.c
-	@mkdir -p build/obj
+$(OUT)/obj/prelude_regexp.o: build/prelude_regexp.c
+	@mkdir -p $(OUT)/obj
 	$(CC) -Os -I$(M)/include -I$(M)/build/rsh/include -c $< -o $@
 
-PRELUDE = build/obj/prelude.o build/obj/prelude_regexp.o
+PRELUDE = $(OUT)/obj/prelude.o $(OUT)/obj/prelude_regexp.o
 
-build/rsh: $(OBJ) $(PRELUDE) $(MLIB)
+$(OUT)/rsh: $(OBJ) $(PRELUDE) $(MLIB)
 	$(CXX) $(CXXFLAGS) -o $@ $(OBJ) $(PRELUDE) $(MLIB) $(LDFLAGS) $(LIBS)
 
-build/unit: tests/unit.cpp $(LIBOBJ) $(PRELUDE) $(MLIB)
+$(OUT)/unit: tests/unit.cpp $(LIBOBJ) $(PRELUDE) $(MLIB)
 	$(CXX) $(CXXFLAGS) $(PCRE) -Isrc -o $@ tests/unit.cpp $(LIBOBJ) $(PRELUDE) $(MLIB) $(LDFLAGS) $(LIBS)
 
-test: build/unit build/rsh
-	./build/unit
-	RSH=$(CURDIR)/build/rsh sh tests/run.sh
-	sh tests/doctrine.sh build/rsh
-	@if command -v ruby >/dev/null; then ruby tests/interactive.rb build/rsh; else echo 'interactive: ruby missing, skipped'; fi
+# The release gate (docs/STABILITY.md): the program's tests, the frozen contract, then every test
+# again on the sanitizer build (address + undefined behaviour, leaks checked; any report fails).
+# SANITIZE=0 leaves the second half out (a build host without the sanitizer libraries); a release
+# is never tagged from such a run.
+SANITIZE ?= 1
+test: $(OUT)/unit $(OUT)/rsh
+	./$(OUT)/unit
+	RSH=$(CURDIR)/$(OUT)/rsh sh tests/run.sh
+	sh tests/contract.sh $(OUT)/rsh
+	sh tests/doctrine.sh $(OUT)/rsh
+	@if command -v ruby >/dev/null; then ruby tests/interactive.rb $(OUT)/rsh; else echo 'interactive: ruby missing, skipped'; fi
+ifeq ($(SANITIZE),1)
+	$(MAKE) --no-print-directory asan
+	$(ASAN_ENV) ./build/asan/unit
+	$(ASAN_ENV) RSH=$(CURDIR)/build/asan/rsh sh tests/run.sh
+	$(ASAN_ENV) sh tests/contract.sh build/asan/rsh
+	@echo 'sanitizer run: ok'
+else
+	@echo 'sanitizer run: skipped (SANITIZE=0); not a release gate'
+endif
+
+# The sanitizer build: shared libraries (the sanitizers need them), symbols kept, -O1.
+SAN = -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+ASAN_ENV = ASAN_OPTIONS=detect_leaks=1:abort_on_error=0:exitcode=99 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1:exitcode=98
+asan: $(MLIB)
+	$(MAKE) --no-print-directory OUT=build/asan LINK=dynamic STRIP= OPT='-O1 -g $(SAN)' build/asan/rsh build/asan/unit
 
 bench: build/rsh
 	sh tests/bench.sh build/rsh
@@ -96,9 +120,9 @@ uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/rsh $(DESTDIR)$(PREFIX)/share/man/man1/rsh.1
 
 clean:
-	rm -rf build/obj build/rsh build/unit
+	rm -rf build/obj build/rsh build/unit build/asan
 
 distclean:
 	rm -rf build
 
-.PHONY: all test bench install uninstall clean distclean
+.PHONY: all test asan bench install uninstall clean distclean

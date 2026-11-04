@@ -1,0 +1,20 @@
+mode: shell
+   1 R  # SPDX-License-Identifier: GPL-2.0-or-later
+   2 R  # Audit M1: the built-in interpreter's Kernel functions are Ruby words; `open "notes.txt"` opens the
+   3 R  # file and never runs a program called open. `sleep` stays a command.
+   4 R  File.write("notes.txt", "one\ntwo\n")
+   5 R  f = open "notes.txt"
+   6 R  puts f.read.lines.size
+   7 R  f.close
+   8 R  open "notes.txt"
+   9 R  __dir__
+  10 R  putc "x"
+  11 R  putc 10
+  12 R  p __dir__.nil?
+  13 R  p __callee__
+  14 R  tap { puts "tap is Ruby" }
+  15 R  p itself.equal?(self)
+  16 R  p local_variables.include?(:f)
+  17 C  sleep 0
+  18 C  echo after sleep
+  19    

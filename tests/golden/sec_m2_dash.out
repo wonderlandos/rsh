@@ -1,0 +1,6 @@
+./-rf a.txt home
+./-rf
+a.txt
+
+home:
+status: 1

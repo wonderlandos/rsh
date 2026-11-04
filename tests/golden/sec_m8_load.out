@@ -1,0 +1,7 @@
+Rsh.eval: test exited 1
+require_relative: bad file
+require_relative: test exited 1
+:found_next_to_main
+source: 1
+load: bad file
+status: 0

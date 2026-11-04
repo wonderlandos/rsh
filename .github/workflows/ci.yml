@@ -10,14 +10,15 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      # Actions pinned to a commit (audit L7); the tag is in the comment.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Build tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential bison ruby pkg-config libpcre2-dev
       - name: Build
         run: make -j"$(nproc)"
-      - name: Test
+      - name: Test (the release gate: tests, contract, the sanitizer build)
         run: make test
       - name: Size (limit 3 MB)
         run: |
@@ -29,7 +30,7 @@ jobs:
           make install DESTDIR="$PWD/stage" PREFIX=/usr
           test -x stage/usr/bin/rsh
           test -f stage/usr/share/man/man1/rsh.1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: rsh-linux-x86_64
           path: build/rsh

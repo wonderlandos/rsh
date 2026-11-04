@@ -7,6 +7,7 @@
 require 'pty'
 require 'io/console'
 require 'tmpdir'
+require 'fileutils'
 
 rsh = File.expand_path(ARGV[0] || File.join(__dir__, '../build/rsh'))
 home = Dir.mktmpdir('rsh-int')
@@ -69,6 +70,69 @@ checks += 1
 failed << 'history file not written' unless File.exist?(hist)
 checks += 1
 failed << "history mode #{File.stat(hist).mode.to_s(8)}" if File.exist?(hist) && (File.stat(hist).mode & 0o77) != 0
+# 0.1.3 (audit M3, M4, H3): a second session in a fresh home with an unsafe init.rsh, an old history
+# file with mode 0644, a folder whose name holds terminal escapes, and lines history must not keep.
+home2 = Dir.mktmpdir('rsh-int2')
+state = File.join(home2, '.local/state/rsh')
+FileUtils.mkdir_p(state)
+File.chmod(0o700, state)
+hist2 = File.join(state, 'history')
+File.write(hist2, "echo old-entry\n")
+File.chmod(0o644, hist2)
+cfg = File.join(home2, '.config/rsh')
+FileUtils.mkdir_p(cfg)
+File.write(File.join(cfg, 'init.rsh'), "puts 'INIT-RAN'\n")
+File.chmod(0o666, File.join(cfg, 'init.rsh'))
+evil = File.join(home2, "e\e[2Jx")
+Dir.mkdir(evil)
+session = lambda do |h, lines|
+  seen = +''
+  PTY.spawn(env.merge('HOME' => h), rsh, unsetenv_others: true) do |out, inp, pid|
+    read = lambda do |wait|
+      buf = +''
+      buf << out.read_nonblock(8192) while IO.select([out], nil, nil, wait)
+      buf
+    rescue EOFError, Errno::EIO
+      buf
+    end
+    seen << read.call(1)
+    lines.each do |l|
+      inp.write(l)
+      seen << read.call(0.4)
+    end
+    inp.write("\x04")
+    read.call(0.3)
+    Process.kill('TERM', pid) rescue nil # rubocop:disable Style/RescueModifier
+  end
+  seen
+end
+# (the name is not typed: an escape typed on the keyboard is a key, not text)
+seen = session.call(home2, ["Dir.chdir(Dir.glob(ENV['HOME'] + '/e*x')[0])\r", "\r", "echo visible-entry\r", " echo space-entry\r",
+                            "export MY_TOKEN=abc123\r", "cd\r"])
+check = lambda do |label, ok|
+  checks += 1
+  failed << label unless ok
+end
+check.call("unsafe init.rsh refused: #{seen[0, 300].inspect}", seen.include?('others can write it') && !seen.include?('INIT-RAN'))
+check.call('prompt shows an escape in a folder name as ^[', seen.include?('e^[[2Jx') && !seen.include?("e\e[2Jx"))
+kept = File.read(hist2)
+check.call("history keeps ordinary lines: #{kept.inspect}", kept.include?('echo visible-entry') && kept.include?('echo old-entry'))
+check.call("history drops a line with a leading space: #{kept.inspect}", !kept.include?('space-entry'))
+check.call("history drops a secret: #{kept.inspect}", !kept.include?('MY_TOKEN'))
+check.call("an old history file gets mode 0600: #{File.stat(hist2).mode.to_s(8)}", (File.stat(hist2).mode & 0o777) == 0o600)
+# A history that is a symbolic link is not followed.
+home3 = Dir.mktmpdir('rsh-int3')
+state3 = File.join(home3, '.local/state/rsh')
+FileUtils.mkdir_p(state3)
+File.chmod(0o700, state3)
+target = File.join(home3, 'elsewhere')
+File.write(target, '')
+File.symlink(target, File.join(state3, 'history'))
+seen = session.call(home3, ["echo via-link\r"])
+check.call("history link refused: #{seen[0, 300].inspect}", seen.include?('it is a symbolic link'))
+check.call('the link target is not written', File.read(target).empty?)
+[home2, home3].each { |d| FileUtils.rm_rf(d) }
+
 puts "interactive: #{checks} checks, #{failed.size} failed"
 failed.each { |f| warn f }
 exit(failed.empty? ? 0 : 1)

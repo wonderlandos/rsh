@@ -1,0 +1,11 @@
+braces: a {a,b} pattern gives more than 100000 words
+Dir.glob braces: a {a,b} pattern gives more than 100000 words
+xac xad xbc xbd
+d/e/x.txt
+zzprog: not found, status 127
+unset A=b: status 2
+NAME=["a", "b"]: V=: an Array value is many words and a variable holds one; join it (list.join(" "))
+here-document: an Array value in a here-document; join it (list.join("\n"))
+pwd: status 1
+cd ..: status 0
+status: 0

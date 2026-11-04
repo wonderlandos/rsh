@@ -1,0 +1,13 @@
+0022
+umask "u=rwx,go=rx": status 2
+umask "22x": status 2
+umask "abc": status 2
+umask "8": status 2
+umask "": status 2
+umask "12345": status 2
+umask "-1": status 2
+two masks: status 2
+0022
+0077
+-rw-------
+status: 0

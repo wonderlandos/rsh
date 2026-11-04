@@ -1,0 +1,13 @@
+line 1
+line 2
+line 3
+marker-1
+AUTHOR-WROTE-A
+AUTHOR-WROTE-B
+OTHER-FILE-LINE
+AUTHOR-WROTE-B
+later-runs
+eval 4
+eval 5
+after-source
+status: 0

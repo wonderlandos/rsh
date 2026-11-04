@@ -11,7 +11,7 @@ Labels: [mem] = from memory/ADRs, [fresh] = reasoned or measured now.
 
 ## 0. One-paragraph summary
 
-`rsh` is one static binary (`/usr/bin/rsh`): the embedded Ruby interpreter plus a C++ shell layer.
+`rsh` is one program (`/usr/bin/rsh`): the embedded Ruby interpreter plus a C++ shell layer. `LINK=static` (the default build, the CI artifact) is one file with no shared libraries; the WolOS package builds `LINK=dynamic` (glibc and libpcre2-8 shared, the C++ runtime linked in). docs/STABILITY.md says which is shipped.
 A script is Ruby; any *statement* whose first word is not something Ruby knows is a *command line*
 with shell syntax (pipes, redirects, `&&`, `||`, globs, `&`, here-docs). rsh rewrites each command
 line into one call of its runner before compiling, keeping line numbers, so the interpreter never sees

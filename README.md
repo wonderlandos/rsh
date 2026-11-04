@@ -164,11 +164,11 @@ puts down.empty? ? "all up" : "down: #{down.join(", ")}"
 
 ## Install
 
-From the release source (needs a C++17 compiler, `make`, `bison`, `ruby` and `pcre2`; `ruby` is only used while building):
+From the release source (needs a C++20 compiler, `make`, `bison`, `ruby` and `pcre2`; `ruby` is only used while building):
 
 ```sh
-curl -fsSLO https://github.com/wonderlandos/rsh/archive/refs/tags/v0.1.2.tar.gz
-tar -xzf v0.1.2.tar.gz && cd rsh-0.1.2
+curl -fsSLO https://github.com/wonderlandos/rsh/archive/refs/tags/v0.1.3.tar.gz
+tar -xzf v0.1.3.tar.gz && cd rsh-0.1.3
 make && make test
 sudo make install            # /usr/local/bin/rsh and its manual page
 ```
@@ -206,10 +206,11 @@ The rule looks only at the text, so a script means the same on every computer.
 ## Safety
 
 - **One value, one argument.** `#{name}` in a command is exactly one argument, whatever it holds: spaces, quotes, `*`, `;` or a new line. An Array gives one argument per element. A value is never split again or expanded as a pattern, and `nil` is an error, not an empty word.
-- **Nothing goes through `sh`.** Command lines are read once, when the file is read, and run directly. Back-quotes use the same reader, not `/bin/sh`. `system("prog", "arg")` takes separate arguments. (`ssh` still hands its command to the other computer's shell: that is how `ssh` works.)
+- **Nothing goes through `sh`.** Command lines are read once, when the file is read, and run directly. Back-quotes use the same reader, not `/bin/sh`. `system("prog", "arg")` takes separate arguments. `open("|cmd")` and `IO.popen` are errors, and a NUL byte in an argument is an error, not a shorter argument. (`ssh` still hands its command to the other computer's shell: that is how `ssh` works.)
 - **Failures are not silent.** A command that fails raises `Rsh::Failed` with `status`, `argv` and the end of its error output, unless it is a condition (`if`, `while`, left of `&&` or `||`). Uncaught, the script stops with the file, the line and the exit status. `|| true` ignores one failure, `relaxed!` turns raising off for the rest of the script, and `$?` is set either way.
 - **No match is an error.** `rm *.tmp` with no `.tmp` file stops instead of removing a file named `*.tmp` (`Rsh.nullglob = true` changes that).
-- `rsh --lint` warns about commands that are not on `PATH`, `sh -c` text with a value inside, world-writable `chmod` and fixed `/tmp` names.
+- `rsh --lint` warns about commands that are not on `PATH`, `sh -c` text with a value inside, world-writable `chmod`, fixed `/tmp` names and a value as the first argument of a program (write `rm -- #{f}`); it exits 0 clean, 1 with warnings, 2 with errors.
+- Stable: the flags, exit statuses, messages, the reading rule and its word list are frozen ([docs/STABILITY.md](docs/STABILITY.md)); `make test` checks them and runs every test again under the address and undefined-behaviour sanitizers.
 
 ## Metaprogramming
 

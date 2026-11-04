@@ -7,7 +7,10 @@
 MRuby::Build.new('rsh') do |conf|
   conf.toolchain :gcc
   conf.cc.flags = %w[-Os -fPIC -ffunction-sections -fdata-sections]
-  conf.cc.defines += %w[MRB_UTF8_STRING MRB_STR_LENGTH_MAX=0]
+  # MRB_STR_LENGTH_MAX=0, MRB_ARY_LENGTH_MAX=0: no fixed cap on String and Array sizes (the default
+  # Array cap, 131072 entries, made File.readlines of a longer file fail). MRB_NO_IO_POPEN: no
+  # IO.popen and no open("|cmd"), which hand text to /bin/sh; rsh never does.
+  conf.cc.defines += %w[MRB_UTF8_STRING MRB_STR_LENGTH_MAX=0 MRB_ARY_LENGTH_MAX=0 MRB_NO_IO_POPEN]
   # bin-mrbc: build-time compiler for the gems' Ruby parts (not linked into rsh).
   conf.gem core: "mruby-bin-mrbc"
   %w[compiler array-ext string-ext hash-ext enum-ext enumerator enum-lazy numeric-ext kernel-ext

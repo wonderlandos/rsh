@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // rsh unit tests: the reader (statement starts, the command-line rule, the command-line grammar),
 // patterns and argument safety. Plain checks, no framework: `make test` runs build/unit.
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -8,6 +10,7 @@
 #include <set>
 #include <string>
 
+#include "edit.hpp"
 #include "exec.hpp"
 #include "glob.hpp"
 #include "rt.hpp"
@@ -69,6 +72,107 @@ static std::vector<std::string> argv_of(const std::string& text, std::vector<Val
     for (auto& w : table()[size_t(idx)].items[0].pipeline[0].words)
         if (!expand(w, vals, h, out, e)) return {"ERR: " + e};
     return out;
+}
+
+// The 0.1.3 fixes (docs/STABILITY.md; audit ids in the comments).
+static void test_audit() {
+    // H2: a NUL byte in a value is an error, as an argument, in a word, in an Array.
+    {
+        Value v;
+        v.items = {std::string("keep\0dropped", 12)};
+        CHECK(argv_of("echo #{x}", {v})[0].find("ERR: a value holds a NUL byte") == 0);
+        CHECK(argv_of("echo pre-#{x}", {v})[0].find("ERR: a value holds a NUL byte") == 0);
+        Value a;
+        a.array = true;
+        a.items = {"ok", std::string("a\0b", 3)};
+        CHECK(argv_of("echo #{x}", {a})[0].find("ERR: a value holds a NUL byte") == 0);
+    }
+    // L1: brace patterns stop at BRACE_LIMIT words.
+    {
+        std::string p;
+        for (int k = 0; k < 20; ++k) p += "{a,b}";
+        bool over = false;
+        CHECK(brace_expand(p, &over).size() <= BRACE_LIMIT && over);
+        over = true;
+        CHECK(brace_expand("{a,b}{c,d}", &over).size() == 4 && !over);
+        CHECK(argv_of("echo x" + p)[0].find("ERR: a {a,b} pattern gives more than") == 0);
+    }
+    // M2, L2: a matched name that starts with - comes out as ./-name; ** does not follow links.
+    {
+        char dir[] = "/tmp/rsh-unit-XXXXXX";
+        CHECK(mkdtemp(dir) != nullptr);
+        std::string d = dir, mk = "cd '" + d + "' && touch -- -rf a && mkdir -p s/t && ln -s .. s/t/up && touch s/t/x";
+        CHECK(std::system(mk.c_str()) == 0);
+        std::string here = current_dir();
+        CHECK(chdir(dir) == 0);
+        CHECK(argv_of("echo *") == (std::vector<std::string>{"echo", "./-rf", "a", "s"}));
+        CHECK(argv_of("echo **/x") == (std::vector<std::string>{"echo", "s/t/x"}));
+        // L3: an empty PATH part is not the current folder.
+        CHECK(std::system("printf '#!/bin/sh\\n' > zz-unit && chmod +x zz-unit") == 0);
+        std::string path = getenv("PATH") ? getenv("PATH") : "";
+        setenv("PATH", (":" + path).c_str(), 1);
+        CHECK(find_program("zz-unit").empty());
+        setenv("PATH", (path + ":").c_str(), 1);
+        CHECK(find_program("zz-unit").empty());
+        setenv("PATH", path.c_str(), 1);
+        CHECK(find_program("./zz-unit") == "./zz-unit");
+        // H3, M4: a file is one's own only when plain, owned, not writable by others, not a link.
+        std::string why;
+        CHECK(std::system("touch own && chmod 600 own && touch wide && chmod 666 wide && touch grp && chmod 660 grp && ln -s own link") == 0);
+        int fd = open_own(d + "/own", O_RDONLY, true, why);
+        CHECK(fd >= 0 && why.empty());
+        if (fd >= 0) close(fd);
+        CHECK(open_own(d + "/wide", O_RDONLY, false, why) < 0 && why == "others can write it");
+        CHECK(open_own(d + "/grp", O_RDONLY, true, why) < 0 && why == "its group can write it");
+        fd = open_own(d + "/grp", O_RDONLY, false, why);
+        CHECK(fd >= 0);
+        if (fd >= 0) close(fd);
+        CHECK(open_own(d + "/link", O_RDONLY, false, why) < 0 && why == "it is a symbolic link");
+        CHECK(open_own(d + "/none", O_RDONLY, false, why) < 0 && why.empty());
+        CHECK(chmod((d + "/s").c_str(), 0755) == 0 && own_dir(d + "/s", true, why));
+        CHECK(!own_dir(d + "/own", false, why) && why == "it is not a folder");
+        CHECK(std::system("ln -s s slink") == 0);
+        CHECK(!own_dir(d + "/slink", false, why) && why == "it is a symbolic link");
+        // L10: the current folder removed.
+        CHECK(std::system("mkdir gone") == 0);
+        CHECK(chdir("gone") == 0);
+        CHECK(rmdir((d + "/gone").c_str()) == 0);
+        CHECK(current_dir().empty());
+        CHECK(chdir(here.c_str()) == 0);
+        std::string rm = "rm -rf '" + d + "'";
+        CHECK(std::system(rm.c_str()) == 0);
+    }
+    // H3: the home of an account from /etc/passwd.
+    CHECK(home_of_uid(0) == home_of("root"));
+    CHECK(!home_of_uid(0).empty());
+    CHECK(home_of_uid(4294967000u).empty());
+    // M3: what reaches the terminal.
+    CHECK(printable("plain ok") == "plain ok");
+    CHECK(printable("a\x1b]0;x\x07" "b") == "a^[]0;x^Gb");
+    CHECK(printable("\x1b[2J") == "^[[2J");
+    CHECK(printable("del\x7f") == "del^?");
+    CHECK(printable("caf\xc3\xa9 \xe6\x97\xa5") == "caf\xc3\xa9 \xe6\x97\xa5");  // UTF-8 stays
+    CHECK(printable("\xc2\x9b") == "\\xc2\\x9b");                                // C1 control (CSI)
+    CHECK(printable("bad\xff") == "bad\\xff");
+    // M4: what history keeps.
+    CHECK(keep_out_of_history(" ls -l"));
+    CHECK(keep_out_of_history("export GITHUB_TOKEN=abc"));
+    CHECK(keep_out_of_history("DB_PASSWORD=x make deploy"));
+    CHECK(keep_out_of_history("ENV[\"API_KEY\"] = k"));
+    CHECK(keep_out_of_history("curl -H 'Authorization: Bearer x' u"));
+    CHECK(keep_out_of_history("git push https://ghp_abcdefghijklmnopqrstuvwxyz0123456789@github.com/x"));
+    CHECK(keep_out_of_history("echo AKIAABCDEFGHIJKLMNOP"));
+    CHECK(keep_out_of_history("tool --secret=s"));
+    CHECK(!keep_out_of_history("ls -l"));
+    CHECK(!keep_out_of_history("echo $GITHUB_TOKEN | wc -c"));
+    CHECK(!keep_out_of_history("grep password notes.txt"));
+    CHECK(!keep_out_of_history("make task-build"));
+    // L9: columns on the terminal.
+    CHECK(visible_width("abc") == 3);
+    CHECK(visible_width("\xe6\x97\xa5\xe6\x9c\xac") == 4);         // two wide characters
+    CHECK(visible_width("e\xcc\x81") == 1);                          // e + combining acute
+    CHECK(visible_width("\xf0\x9f\x98\x80") == 2);                   // an emoji
+    CHECK(visible_width("\x1b[1;34m~/x\x1b[0m > ") == 6);
 }
 
 static void test_modes() {
@@ -282,6 +386,8 @@ int main() {
     CHECK(brace_expand("{a}").size() == 1);
     std::string rm = "rm -rf '" + d + "'";
     CHECK(std::system(rm.c_str()) == 0);
+
+    test_audit();
 
     std::printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

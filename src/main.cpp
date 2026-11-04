@@ -3,6 +3,7 @@
 // `rsh` alone on a terminal is interactive. Every file (`.rsh` or `.rb`) has the shell layer; a
 // first line `# rsh: ruby` turns it off (plain Ruby). See rsh(1) and docs/rsh.md.
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -30,7 +31,9 @@ const char* USAGE =
     "  --explain   show the mode and how each line is read: C command line, R Ruby, X a capture inside Ruby\n"
     "  --ruby      show the Ruby text rsh runs\n"
     "  -i          interactive (-l, a login window, is the same)\n"
-    "  -v          version\n";
+    "  -v          version (--version is the same)\n"
+    "  -h          this text (--help is the same)\n"
+    "  --          the end of the options: the next word is the file\n";
 
 // ---- interactive: colours and completion ---------------------------------------------------------
 
@@ -240,36 +243,56 @@ std::vector<std::string> complete(const std::string& line, size_t start) {
     return std::vector<std::string>(c.begin(), c.end());
 }
 
-std::string short_cwd() {
-    char buf[4096];
-    if (!getcwd(buf, sizeof buf)) return "?";
-    std::string c = buf, h = home_of("");
+std::string short_cwd(const std::string& h) {
+    std::string c = current_dir();
+    if (c.empty()) return "?";
     if (!h.empty() && h != "/" && c.compare(0, h.size(), h) == 0 && (c.size() == h.size() || c[h.size()] == '/'))
         c = "~" + c.substr(h.size());
-    return c;
+    return printable(c);  // a folder name with terminal escapes is shown, not obeyed (audit M3)
 }
+
+// Root, or a set-user-id start: the person's environment ($HOME, $XDG_*) may point into another
+// person's files (sudo -E, su without -), so it is not used for init.rsh and history (audit H3).
+bool privileged() { return geteuid() == 0 || geteuid() != getuid() || getegid() != getgid(); }
 
 int interactive() {
     setup_interactive();
     mrb_state* mrb = rt_open("rsh", {});
     if (!mrb) return 70;
-    std::string home = home_of("");
-    const char* xdg = getenv("XDG_CONFIG_HOME");
-    std::string init = (xdg && *xdg ? std::string(xdg) : home + "/.config") + "/rsh/init.rsh";
-    if (access(init.c_str(), R_OK) == 0) {
-        bool ok;
-        std::string src = read_file(init, ok);
-        if (ok) rt_run(mrb, src, init, true);
+    const bool strict = privileged();
+    std::string home = strict ? home_of_uid(geteuid()) : home_of("");
+    if (home.empty()) home = "/";
+    auto from_env = [&](const char* name) -> std::string {
+        const char* v = strict ? nullptr : getenv(name);
+        return v && *v ? v : "";
+    };
+    std::string cfg = from_env("XDG_CONFIG_HOME");
+    std::string init = (cfg.empty() ? home + "/.config" : cfg) + "/rsh/init.rsh";
+    {
+        std::string why;
+        int fd = open_own(init, O_RDONLY, strict, why);
+        if (fd >= 0) {  // read from the file that was checked, not the name again
+            std::string src;
+            char b[65536];
+            ssize_t n;
+            while ((n = read(fd, b, sizeof b)) > 0) src.append(b, size_t(n));
+            close(fd);
+            rt_run(mrb, src, init, true);
+        } else if (!why.empty())
+            std::fprintf(stderr, "rsh: not running %s: %s\n", printable(init).c_str(), why.c_str());
     }
-    const char* xs = getenv("XDG_STATE_HOME");
-    std::string state = xs && *xs ? std::string(xs) : home + "/.local/state";
-    if (!xs || !*xs) {
-        mkdir((home + "/.local").c_str(), 0700);
-    }
+    std::string xs = from_env("XDG_STATE_HOME");
+    std::string state = xs.empty() ? home + "/.local/state" : xs;
+    if (xs.empty()) mkdir((home + "/.local").c_str(), 0700);
     mkdir(state.c_str(), 0700);
     mkdir((state + "/rsh").c_str(), 0700);
     Editor ed;
-    ed.history_file = state + "/rsh/history";
+    ed.strict = strict;
+    {
+        std::string why;
+        if (own_dir(state + "/rsh", strict, why)) ed.history_file = state + "/rsh/history";
+        else if (!why.empty()) std::fprintf(stderr, "rsh: history is not kept in a file this time: %s: %s\n", printable(state + "/rsh").c_str(), why.c_str());
+    }
     ed.load();
     ed.paint = paint;
     ed.complete = complete;
@@ -282,7 +305,7 @@ int interactive() {
         std::string prompt;
         if (!buf.empty()) prompt = std::string(GREY) + "  ... " + RESET;
         else if (!rt_prompt(mrb, prompt))
-            prompt = std::string("\x1b[1;34m") + short_cwd() + RESET + (status ? std::string(RED) + " " + std::to_string(status) + RESET : "") +
+            prompt = std::string("\x1b[1;34m") + short_cwd(home) + RESET + (status ? std::string(RED) + " " + std::to_string(status) + RESET : "") +
                      " \x1b[1;35m>\x1b[0m ";
         std::string line;
         if (!ed.read(prompt, line)) {
@@ -298,7 +321,7 @@ int interactive() {
         if (incomplete) continue;
         std::string entry = buf.substr(0, buf.size() - 1);
         ed.add(entry);
-        rt_add_history(entry);
+        if (!keep_out_of_history(entry)) rt_add_history(entry);
         buf.clear();
         status = st;
         if (exited) {

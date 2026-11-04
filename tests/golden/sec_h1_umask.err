@@ -1,0 +1,8 @@
+rsh: umask: u=rwx,go=rx: write the mask in octal digits, as 022 or 0077
+rsh: umask: 22x: write the mask in octal digits, as 022 or 0077
+rsh: umask: abc: write the mask in octal digits, as 022 or 0077
+rsh: umask: 8: write the mask in octal digits, as 022 or 0077
+rsh: umask: : write the mask in octal digits, as 022 or 0077
+rsh: umask: 12345: write the mask in octal digits, as 022 or 0077
+rsh: umask: -1: write the mask in octal digits, as 022 or 0077
+rsh: umask: one mask at a time

@@ -1,0 +1,9 @@
+open pipe: open("|...") would run the text with /bin/sh, which rsh never does; write the command line itself, or `cmd args` for its output
+open pipe, block: open("|...") would run the text with /bin/sh, which rsh never does; write the command line itself, or `cmd args` for its output
+IO.popen: IO.popen would run its text with /bin/sh, which rsh never does; write the command line itself, `cmd args` for its output, or system("prog", "arg")
+IO.popen array: IO.popen would run its text with /bin/sh, which rsh never does; write the command line itself, `cmd args` for its output, or system("prog", "arg")
+IO._popen: IO.popen would run its text with /bin/sh, which rsh never does; write the command line itself, `cmd args` for its output, or system("prog", "arg")
+kept
+pipe in the middle is a file name
+captured
+status: 0

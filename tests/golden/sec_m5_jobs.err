@@ -1,0 +1,2 @@
+rsh: fg: no job control here (a script waits for its jobs with wait)
+rsh: bg: no job control here (a script waits for its jobs with wait)

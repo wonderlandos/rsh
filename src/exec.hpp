@@ -69,6 +69,10 @@ bool is_builtin(const std::string& name);
 std::string find_program(const std::string& name);
 // Home folder of `user` from /etc/passwd ("" = the current person's $HOME).
 std::string home_of(const std::string& user);
+// Home folder of the account `uid` from /etc/passwd ("" when there is none).
+std::string home_of_uid(uid_t uid);
+// The current folder, any length; "" when it was removed.
+std::string current_dir();
 // Jobs that ended since the last call, as "[1]+ Done  text" lines (interactive).
 void report_jobs();
 void setup_interactive();

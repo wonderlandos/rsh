@@ -259,13 +259,22 @@ There is no
 .B eval
 and no network library: use a command (curl, wol) for that.
 .B system
-takes separate arguments only.
+takes separate arguments only. No text ever goes to
+.BR /bin/sh :
+.B open("|cmd")
+and
+.B IO.popen
+are errors. A NUL byte in an argument, a variable value or a file name is an error.
+.B umask
+takes octal digits only.
 .SS Interactive use
 On a terminal
 .B rsh
 is a shell: a line editor with history (kept in
 .IR ~/.local/state/rsh/history ,
-readable only by you), Ctrl-R search, Tab completion of commands, files and your variables and
+mode 0600; a line that starts with a space or looks like it holds a secret, such as
+.BR "export API_TOKEN=..." ,
+is not kept), Ctrl-R search, Tab completion of commands, files and your variables and
 methods, lines that go on while the Ruby is not finished, job control (Ctrl-Z,
 .BR fg ,
 .BR bg ),
@@ -274,7 +283,11 @@ not. If
 .I ~/.config/rsh/init.rsh
 exists it runs first; a method named
 .B prompt
-in it gives the prompt text.
+in it gives the prompt text. The start-up file and the history are used only when they are plain
+files you own that others cannot write; as root the home comes from
+.IR /etc/passwd ,
+not from
+.BR $HOME .
 .SH OPTIONS
 .TP
 .BI \-c " text" ", " \-e " text"
@@ -297,9 +310,13 @@ Read and compile the script and run nothing.
 Like
 .BR \-n ,
 with warnings for command words that are not on PATH, text built into
-.B "sh \-c"
-and world-writable
-.BR chmod .
+.BR "sh \-c" ,
+world-writable
+.BR chmod ,
+fixed
+.I /tmp
+names and a value as the first argument of a program. Exit status 0 when clean, 1 with warnings
+only, 2 with errors.
 .TP
 .B \-\-explain
 Show the mode (shell or ruby), then how each line is read.
@@ -312,11 +329,19 @@ Interactive.
 .TP
 .BR \-v ", " \-\-version
 Print the version.
+.TP
+.BR \-h ", " \-\-help
+Print the options.
+.TP
+.B \-\-
+The end of the options: the next word is the file.
 .SH EXIT STATUS
 The script's own
 .BR exit ;
-else the status of the failed command that ended it; 2 for a mistake in the script itself found
-before it runs; 127 if the file cannot be read.
+else the status of the failed command that ended it (128+N when a signal N ended it); 130 when
+interrupted; 1 for a Ruby error; 2 for a mistake in the script itself found before it runs, or a
+bad option; 127 if the file cannot be read or a command is not found; 126 if a command cannot run;
+70 if the interpreter cannot start. These are frozen (docs/STABILITY.md in the source).
 .SH ENVIRONMENT
 .TP
 .B XDG_CONFIG_HOME

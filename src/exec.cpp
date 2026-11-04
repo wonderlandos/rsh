@@ -31,6 +31,7 @@ Shell& shell() {
 namespace {
 
 constexpr size_t TAIL = 4096;
+constexpr size_t JOBS_KEPT = 1024;
 
 struct Job {
     int id;
@@ -73,6 +74,14 @@ bool valid_name(const std::string& n) {
 
 }  // namespace
 
+std::string current_dir() {
+    char* p = getcwd(nullptr, 0);  // any length; nullptr when the folder was removed
+    if (!p) return "";
+    std::string s = p;
+    std::free(p);
+    return s;
+}
+
 std::string home_of(const std::string& user) {
     if (user.empty()) {
         const char* h = getenv("HOME");
@@ -97,6 +106,27 @@ std::string home_of(const std::string& user) {
     return home;
 }
 
+std::string home_of_uid(uid_t uid) {
+    FILE* f = std::fopen("/etc/passwd", "r");
+    if (!f) return "";
+    char buf[1024];
+    std::string home;
+    while (std::fgets(buf, sizeof buf, f)) {  // name:password:uid:gid:gecos:home:shell
+        std::string ln(buf);
+        size_t a = ln.find(':'), b = a == std::string::npos ? a : ln.find(':', a + 1);
+        if (b == std::string::npos) continue;
+        size_t c = ln.find(':', b + 1);
+        if (c == std::string::npos || ln.substr(b + 1, c - b - 1) != std::to_string(uid)) continue;
+        size_t d = ln.find(':', c + 1), e = d == std::string::npos ? d : ln.find(':', d + 1);
+        if (e == std::string::npos) break;
+        size_t g = ln.find(':', e + 1);
+        home = ln.substr(e + 1, g == std::string::npos ? std::string::npos : g - e - 1);
+        break;
+    }
+    std::fclose(f);
+    return home;
+}
+
 std::string find_program(const std::string& name) {
     if (name.find('/') != std::string::npos) return access(name.c_str(), X_OK) == 0 ? name : "";
     const char* p = getenv("PATH");
@@ -105,10 +135,12 @@ std::string find_program(const std::string& name) {
     while (i <= path.size()) {
         size_t e = path.find(':', i);
         if (e == std::string::npos) e = path.size();
-        std::string dir = e > i ? path.substr(i, e - i) : ".";
-        std::string full = dir + "/" + name;
-        struct stat st;
-        if (stat(full.c_str(), &st) == 0 && S_ISREG(st.st_mode) && access(full.c_str(), X_OK) == 0) return full;
+        // An empty part (PATH=":/bin", "/bin::") is skipped, not read as the current folder (audit L3).
+        if (e > i) {
+            std::string full = path.substr(i, e - i) + "/" + name;
+            struct stat st;
+            if (stat(full.c_str(), &st) == 0 && S_ISREG(st.st_mode) && access(full.c_str(), X_OK) == 0) return full;
+        }
         i = e + 1;
     }
     return "";
@@ -133,6 +165,14 @@ static bool in_process(const std::string& n) {
 
 bool expand(const Word& w, const std::vector<Value>& vals, Host& h, std::vector<std::string>& out, std::string& err,
             bool glob_ok) {
+    // A program gets C strings: a NUL byte would end the argument early (audit H2).
+    for (auto& p : w.parts)
+        if (p.k == Part::Val)
+            for (auto& s : vals[p.idx].items)
+                if (s.find('\0') != std::string::npos) {
+                    err = "a value holds a NUL byte (\\0); a command argument, variable or file name cannot";
+                    return false;
+                }
     if (w.parts.size() == 1 && w.parts[0].k == Part::Val && vals[w.parts[0].idx].array) {
         for (auto& s : vals[w.parts[0].idx].items) out.push_back(s);
         return true;
@@ -195,7 +235,12 @@ bool expand(const Word& w, const std::vector<Value>& vals, Host& h, std::vector<
             }
         }
     }
-    std::vector<std::string> alts = (brace && !has_val) ? brace_expand(pat) : std::vector<std::string>{pat};
+    bool too_many = false;
+    std::vector<std::string> alts = (brace && !has_val) ? brace_expand(pat, &too_many) : std::vector<std::string>{pat};
+    if (too_many) {
+        err = "a {a,b} pattern gives more than " + std::to_string(BRACE_LIMIT) + " words";
+        return false;
+    }
     for (auto& a : alts) {
         if (glob_ok && meta && glob_has_meta(a)) {
             auto m = glob(a);
@@ -203,7 +248,8 @@ bool expand(const Word& w, const std::vector<Value>& vals, Host& h, std::vector<
                 err = "no file matches " + glob_unescape(a);
                 return false;
             }
-            for (auto& x : m) out.push_back(x);
+            // A file named -rf must not become an option of the program (audit M2): ./-rf.
+            for (auto& x : m) out.push_back(x[0] == '-' ? "./" + x : x);
         } else out.push_back(glob_unescape(a));
     }
     return true;
@@ -241,6 +287,11 @@ bool expand_cmd(const Cmd& c, const std::vector<Value>& vals, Host& h, Stage& st
         return false;
     }
     for (auto& [name, w] : c.env) {
+        for (auto& p : w.parts)
+            if ((p.k == Part::Val && vals[p.idx].array) || p.k == Part::Args) {
+                err = name + "=: an Array value is many words and a variable holds one; join it (list.join(\" \"))";
+                return false;
+            }
         std::vector<std::string> v;
         if (!expand(w, vals, h, v, err, false)) return false;
         std::string j;
@@ -253,8 +304,11 @@ bool expand_cmd(const Cmd& c, const std::vector<Value>& vals, Host& h, Stage& st
             for (auto& p : r.target.parts) {
                 if (p.k == Part::Lit || p.k == Part::Pat) x.target += p.s;
                 else if (p.k == Part::Val) {
-                    auto& v = vals[p.idx].items;
-                    for (size_t k = 0; k < v.size(); ++k) x.target += (k ? " " : "") + v[k];
+                    if (vals[p.idx].array) {  // as in a word: an Array is not joined silently (audit L5)
+                        err = "an Array value in a here-document; join it (list.join(\"\\n\"))";
+                        return false;
+                    }
+                    if (!vals[p.idx].items.empty()) x.target += vals[p.idx].items[0];
                 } else if (p.k == Part::Env) {
                     const char* e = getenv(p.s.c_str());
                     if (!e) {
@@ -324,7 +378,8 @@ std::vector<std::string> env_with(const std::vector<std::pair<std::string, std::
     return e;
 }
 
-int run_builtin(const std::vector<std::string>& a, Host& h);
+using Env = std::vector<std::pair<std::string, std::string>>;
+int run_builtin(const std::vector<std::string>& a, Host& h, const Env& env);
 
 // Moves a set of child fds into place in this process (builtins); the old ones are saved.
 struct FdSave {
@@ -374,7 +429,7 @@ bool spawn(Stage& st, int in, int out, int err_to, pid_t pgid, Host& h, std::str
             if (out >= 0) dup2(out, 1);
             if (err_to >= 0) dup2(err_to, 2);
             apply_map(map, nullptr);
-            _exit(run_builtin(st.argv, h));
+            _exit(run_builtin(st.argv, h, st.env));
         }
         done();
         st.pid = pid;
@@ -512,7 +567,7 @@ bool pipeline(const Item& it, const std::vector<Value>& vals, Host& h, const Opt
         Pipe cap;
         if (o.capture && cap.make()) save.set(1, cap.w);
         apply_map(map, &save);
-        int code = run_builtin(stages[0].argv, h);
+        int code = run_builtin(stages[0].argv, h, stages[0].env);
         if (stages[0].argv.size() == 1 && stages[0].argv[0] == "exec" && !o.capture) {
             for (auto& sv : save.saved)  // exec with only redirects: they stay
                 if (sv.second >= 0) close(sv.second);
@@ -724,9 +779,13 @@ bool pipeline(const Item& it, const std::vector<Value>& vals, Host& h, const Opt
 
 }  // namespace
 
-Outcome run(int idx, const std::vector<Value>& vals, Host& h, const Options& o) {
+// Runs one parsed line. `L` is the caller's own copy: a Ruby stage, `source`, `system` or
+// `Rsh.eval` may add lines to table() while this line runs, which moves its entries (audit C1).
+static Outcome run_line(const Line& L, const std::vector<Value>& vals, Host& h, const Options& o) {
     Outcome oc;
-    const Line& L = table()[size_t(idx)];
+    // Background jobs of a script are reaped before each line, so they leave no zombies (audit M5);
+    // the interactive loop does it itself and reports them.
+    if (!shell().interactive && !jobs.empty()) report_jobs();
     int last = shell().last_status;
     int last_item = -1;
     Op prev = Op::End;
@@ -770,6 +829,17 @@ Outcome run(int idx, const std::vector<Value>& vals, Host& h, const Options& o) 
     return oc;
 }
 
+Outcome run(int idx, const std::vector<Value>& vals, Host& h, const Options& o) {
+    if (idx < 0 || size_t(idx) >= table().size()) {
+        Outcome oc;
+        oc.code = 1;
+        oc.error = "no such command line";
+        return oc;
+    }
+    const Line L = table()[size_t(idx)];  // a copy, never a reference into table()
+    return run_line(L, vals, h, o);
+}
+
 Outcome run_argv(const std::vector<std::string>& argv, Host& h, const Options& o) {
     Line L;
     L.file = "(system)";
@@ -790,11 +860,7 @@ Outcome run_argv(const std::vector<std::string>& argv, Host& h, const Options& o
     }
     it.pipeline.push_back(c);
     L.items.push_back(it);
-    table().push_back(L);
-    int idx = int(table().size()) - 1;
-    Outcome oc = run(idx, vals, h, o);
-    table().pop_back();
-    return oc;
+    return run_line(L, vals, h, o);  // a private line: table() is not touched
 }
 
 void report_jobs() {
@@ -815,7 +881,19 @@ void report_jobs() {
             if (shell().interactive) say(2, "[" + std::to_string(j.id) + "]  Done  " + j.text + "\n");
         }
     }
-    jobs.erase(std::remove_if(jobs.begin(), jobs.end(), [](const Job& j) { return j.done; }), jobs.end());
+    if (shell().interactive) {
+        jobs.erase(std::remove_if(jobs.begin(), jobs.end(), [](const Job& j) { return j.done; }), jobs.end());
+        return;
+    }
+    // A script keeps the status of ended jobs for `wait`, the last JOBS_KEPT of them.
+    size_t ended = 0;
+    for (auto& j : jobs) ended += j.done;
+    for (auto it = jobs.begin(); ended > JOBS_KEPT && it != jobs.end();) {
+        if (it->done) {
+            it = jobs.erase(it);
+            --ended;
+        } else ++it;
+    }
 }
 
 void setup_interactive() {
@@ -866,19 +944,19 @@ int wait_job(Job& j) {
 }
 
 int cd_to(const std::string& dir) {
-    char old[4096];
-    if (!getcwd(old, sizeof old)) old[0] = 0;
+    std::string old = current_dir();
     if (chdir(dir.c_str()) != 0) {
         complain("cd: " + dir + ": " + std::strerror(errno));
         return 1;
     }
-    char now[4096];
-    setenv("OLDPWD", old, 1);
-    if (getcwd(now, sizeof now)) setenv("PWD", now, 1);
+    // From a folder that was removed there is no previous folder to keep (audit L10).
+    if (!old.empty()) setenv("OLDPWD", old.c_str(), 1);
+    std::string now = current_dir();
+    if (!now.empty()) setenv("PWD", now.c_str(), 1);
     return 0;
 }
 
-int run_builtin(const std::vector<std::string>& a, Host& h) {
+int run_builtin(const std::vector<std::string>& a, Host& h, const Env& env) {
     const std::string& n = a[0];
     if (n == "cd") {
         if (a.size() > 2) {
@@ -900,16 +978,22 @@ int run_builtin(const std::vector<std::string>& a, Host& h) {
         return cd_to(a[1]);
     }
     if (n == "pwd") {
-        char now[4096];
-        if (!getcwd(now, sizeof now)) return 1;
-        say(1, std::string(now) + "\n");
+        std::string now = current_dir();
+        if (now.empty()) {
+            complain("pwd: the current folder was removed");
+            return 1;
+        }
+        say(1, now + "\n");
         return 0;
     }
     if (n == "pushd" || n == "popd" || n == "dirs") {
         auto& st = shell().dirstack;
-        char now[4096];
-        if (!getcwd(now, sizeof now)) now[0] = 0;
+        std::string now = current_dir();
         if (n == "pushd") {
+            if (now.empty()) {
+                complain("pushd: the current folder was removed");
+                return 1;
+            }
             if (a.size() != 2) {
                 complain("pushd: one folder");
                 return 2;
@@ -925,8 +1009,7 @@ int run_builtin(const std::vector<std::string>& a, Host& h) {
             st.pop_back();
             if (cd_to(d)) return 1;
         }
-        if (!getcwd(now, sizeof now)) now[0] = 0;
-        std::string line = now;
+        std::string line = current_dir();
         for (auto it = st.rbegin(); it != st.rend(); ++it) line += " " + *it;
         say(1, line + "\n");
         return 0;
@@ -952,6 +1035,11 @@ int run_builtin(const std::vector<std::string>& a, Host& h) {
         return 0;
     }
     if (n == "unset") {
+        for (size_t k = 1; k < a.size(); ++k)
+            if (!valid_name(a[k])) {
+                complain("unset: not a variable name: " + a[k]);
+                return 2;
+            }
         for (size_t k = 1; k < a.size(); ++k) unsetenv(a[k].c_str());
         return 0;
     }
@@ -964,7 +1052,19 @@ int run_builtin(const std::vector<std::string>& a, Host& h) {
             say(1, std::string(buf) + "\n");
             return 0;
         }
-        umask(mode_t(std::strtol(a[1].c_str(), nullptr, 8)));
+        // Octal digits only (022, 0077); anything else is an error and the mask stays (audit H1).
+        if (a.size() > 2) {
+            complain("umask: one mask at a time");
+            return 2;
+        }
+        const std::string& m = a[1];
+        bool ok = !m.empty() && m.size() <= 4;
+        for (char c : m) ok = ok && c >= '0' && c <= '7';
+        if (!ok) {
+            complain("umask: " + m + ": write the mask in octal digits, as 022 or 0077");
+            return 2;
+        }
+        umask(mode_t(std::strtol(m.c_str(), nullptr, 8)));
         return 0;
     }
     if (n == "exec") {
@@ -974,12 +1074,15 @@ int run_builtin(const std::vector<std::string>& a, Host& h) {
             complain(a[1] + ": command not found");
             return 127;
         }
-        std::vector<char*> argv;
+        std::vector<char*> argv, envp;
         std::vector<std::string> copy(a.begin() + 1, a.end());
         for (auto& x : copy) argv.push_back(x.data());
         argv.push_back(nullptr);
+        std::vector<std::string> envs = env_with(env);  // NAME=v exec prog keeps NAME (audit M6)
+        for (auto& e : envs) envp.push_back(e.data());
+        envp.push_back(nullptr);
         child_signals_default();
-        execv(prog.c_str(), argv.data());
+        execve(prog.c_str(), argv.data(), envp.data());
         complain(a[1] + ": " + std::strerror(errno));
         return 126;
     }
@@ -1029,13 +1132,20 @@ int run_builtin(const std::vector<std::string>& a, Host& h) {
     if (n == "jobs") {
         report_jobs();
         for (auto& j : jobs)
-            say(1, "[" + std::to_string(j.id) + "]  " + (j.stopped ? "Stopped" : "Running") + "  " + j.text + "\n");
+            say(1, "[" + std::to_string(j.id) + "]  " + (j.done ? "Done" : j.stopped ? "Stopped" : "Running") + "  " + j.text + "\n");
+        jobs.erase(std::remove_if(jobs.begin(), jobs.end(), [](const Job& x) { return x.done; }), jobs.end());
         return 0;
     }
     if (n == "fg" || n == "bg") {
         Job* j = find_job(a);
         if (!j) {
             complain(n + ": no such job");
+            return 1;
+        }
+        // Without job control (a script) or a process group there is nothing to continue; kill()
+        // with group 0 would signal rsh's own group (audit M5).
+        if (!shell().job_control || j->pgid <= 0 || j->done) {
+            complain(n + ": no job control here (a script waits for its jobs with wait)");
             return 1;
         }
         if (n == "bg") {
