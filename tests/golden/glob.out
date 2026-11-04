@@ -6,7 +6,7 @@ a.txt b.txt d/e/f.txt d/g.txt star*.txt
 *.txt *.log
 WORK/home/x
 *.txt
-no match: Rsh::Error
+no match: Rsh::Failed
 
 x1y x2y a1 a2 b1 b2
 status: 0

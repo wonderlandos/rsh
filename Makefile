@@ -21,7 +21,7 @@ M      = build/mruby
 MLIB   = $(M)/build/rsh/lib/libmruby.a
 OPT ?= -Os
 CXXFLAGS += $(OPT) -std=c++20 -Wall -Wextra -Werror -fno-exceptions -fno-rtti -fno-threadsafe-statics -ffunction-sections \
-	-fdata-sections -I$(M)/include -I$(M)/build/rsh/include -DMRB_UTF8_STRING -DMRB_STR_LENGTH_MAX=0 -DMRB_ARY_LENGTH_MAX=0 -DRSH_VERSION='"$(VERSION)"'
+	-fdata-sections -I$(M)/include -I$(M)/build/rsh/include -I$(M)/mrbgems/mruby-io/include -DMRB_UTF8_STRING -DMRB_STR_LENGTH_MAX=0 -DMRB_ARY_LENGTH_MAX=0 -DRSH_VERSION='"$(VERSION)"'
 PCRE   = $(shell pkg-config --cflags libpcre2-8 2>/dev/null) -DPCRE2_CODE_UNIT_WIDTH=8
 ifeq ($(LINK),static)
 LDFLAGS += -static
@@ -69,6 +69,10 @@ build/prelude_regexp.c: src/prelude_regexp.rb $(MLIB)
 build/prelude_more.c: src/prelude_more.rb $(MLIB)
 	$(MRBC) -Brsh_prelude_more -o $@ src/prelude_more.rb
 
+# Sh, FileUtils, Find, Shellwords, Dir.mktmpdir (0.9.0): loaded on first use (src/main.cpp, Rsh.__std).
+build/prelude_std.c: src/prelude_std.rb $(MLIB)
+	$(MRBC) -Brsh_prelude_std -o $@ src/prelude_std.rb
+
 $(OUT)/obj/prelude.o: build/prelude.c
 	@mkdir -p $(OUT)/obj
 	$(CC) -Os -I$(M)/include -I$(M)/build/rsh/include -c $< -o $@
@@ -81,7 +85,11 @@ $(OUT)/obj/prelude_more.o: build/prelude_more.c
 	@mkdir -p $(OUT)/obj
 	$(CC) -Os -I$(M)/include -I$(M)/build/rsh/include -c $< -o $@
 
-PRELUDE = $(OUT)/obj/prelude.o $(OUT)/obj/prelude_regexp.o $(OUT)/obj/prelude_more.o
+$(OUT)/obj/prelude_std.o: build/prelude_std.c
+	@mkdir -p $(OUT)/obj
+	$(CC) -Os -I$(M)/include -I$(M)/build/rsh/include -c $< -o $@
+
+PRELUDE = $(OUT)/obj/prelude.o $(OUT)/obj/prelude_regexp.o $(OUT)/obj/prelude_more.o $(OUT)/obj/prelude_std.o
 
 $(OUT)/rsh: $(OBJ) $(PRELUDE) $(MLIB)
 	$(CXX) $(CXXFLAGS) -o $@ $(OBJ) $(PRELUDE) $(MLIB) $(LDFLAGS) $(LIBS)
@@ -128,6 +136,22 @@ bench: build/rsh
 	sh tests/bench.sh build/rsh
 	sh bench/run.sh build/rsh
 
+# The reader fuzz (docs/STABILITY.md, 0.9.0): tests/fuzz/reader.cpp under libFuzzer with the address
+# and undefined-behaviour sanitizers (needs clang). The seeds are every test script; findings go to
+# build/fuzz/crash-*. FUZZ_SECONDS=1800 is the release-gate run.
+FUZZ_SECONDS ?= 60
+FUZZ_CXX ?= clang++
+build/fuzz/reader: tests/fuzz/reader.cpp src/transpile.cpp src/transpile.hpp src/ast.hpp $(MLIB)
+	@mkdir -p build/fuzz
+	$(FUZZ_CXX) -g -O1 -std=c++20 -fno-exceptions -fno-rtti -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
+		-I$(M)/include -I$(M)/build/rsh/include -DMRB_UTF8_STRING -DMRB_STR_LENGTH_MAX=0 -DMRB_ARY_LENGTH_MAX=0 -Isrc \
+		-o $@ tests/fuzz/reader.cpp src/transpile.cpp $(MLIB) -lm
+fuzz: build/fuzz/reader
+	@mkdir -p build/fuzz/corpus
+	cp tests/golden/*.rsh tests/golden/*.rb tests/examples/*.rsh examples/meta/*.rsh build/fuzz/corpus/
+	cd build/fuzz && ./reader -max_total_time=$(FUZZ_SECONDS) -timeout=5 -rss_limit_mb=2048 -max_len=16384 \
+		-close_fd_mask=2 -print_final_stats=1 corpus
+
 # make install [PREFIX=/usr] [DESTDIR=staging]
 install: build/rsh
 	install -Dm755 build/rsh $(DESTDIR)$(PREFIX)/bin/rsh
@@ -142,4 +166,4 @@ clean:
 distclean:
 	rm -rf build
 
-.PHONY: all test asan bench install uninstall clean distclean
+.PHONY: all test asan fuzz bench install uninstall clean distclean

@@ -1,0 +1,50 @@
+[a  #{name}]
+[b w o]
+[c d]
+[xyz]
+<one two>
+<three>
+<w o>
+env value|env valuex
+[a]
+[b c]
+status after false: 1
+status after exit 3: 3, then #<Rsh::Status 0> (a value is read when the line starts)
+/root WORK/home/sub
+d/a.txt d/b.log d/a.txt d/b.log d/a.txt d/b.log d/a.txt d/e/c.txt d/*
+inside: only-here
+nil
+err
+out
+20
+40
+[false, 3, [3, 0]]
+2
+e1
+e2
+both
+both-err
+MERGED
+HERE W O
+and-ran
+or-ran
+not-found
+continued line
+PIPED
+["captured w o\n", "percent-x\n", true]
+[true, false]
+WORK
+true
+d
+WORK/d/e WORK
+WORK
+true
+cd is a shell builtin
+0027
+true
+true
+pid matches
+to-three
+via-four
+exec-ran
+status: 4

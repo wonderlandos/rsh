@@ -1,0 +1,19 @@
+G2 export: 1 false
+G2 kept: kept
+G7 inside: ["one", "two words"]
+G7 after: []
+G7 inside: []
+[5, true, false, "640", "file", true, true]
+[true, false, true, true]
+[true, false, "link", "directory"]
+[true, true, true, true]
+true
+G9 missing: Errno::ENOENT
+"2024-01-02T03:04:05Z"
+"2024-01-02T03:04:05.123Z"
+true
+500000
+2
+G12: no time information in "next tuesday" (rsh reads ISO 8601: 2024-01-02T03:04:05+01:00)
+G13: cannot load net/http: rsh has its library built in (json, set, time, etc, fileutils, find, shellwords, tmpdir); load your own files with require_relative
+status: 0

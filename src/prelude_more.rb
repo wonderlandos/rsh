@@ -122,3 +122,92 @@ class Dir
     h
   end
 end
+
+class File
+  # File.stat / File.lstat (0.9.0): what `stat` shows, for scripts that check a file in Ruby. The
+  # numbers come from Rsh.__stat (src/rt.cpp); Errno errors as in Ruby.
+  class Stat
+    include Comparable
+
+    def initialize(path, follow = true)
+      @a = Rsh.__stat(path.to_s, follow)
+    end
+
+    def mode = @a[0]
+    def size = @a[1]
+    def uid = @a[2]
+    def gid = @a[3]
+    def nlink = @a[4]
+    def ino = @a[5]
+    def dev = @a[6]
+    def atime = Time.at(@a[7], @a[8])
+    def mtime = Time.at(@a[9], @a[10])
+    def ctime = Time.at(@a[11], @a[12])
+    def rdev = @a[13]
+    def blksize = @a[14]
+    def blocks = @a[15]
+    def size? = size.zero? ? nil : size
+    def zero? = size.zero?
+    def __type = mode & 0o170000
+    def file? = __type == 0o100000
+    def directory? = __type == 0o040000
+    def symlink? = __type == 0o120000
+    def pipe? = __type == 0o010000
+    def socket? = __type == 0o140000
+    def chardev? = __type == 0o020000
+    def blockdev? = __type == 0o060000
+    def setuid? = mode & 0o4000 != 0
+    def setgid? = mode & 0o2000 != 0
+    def sticky? = mode & 0o1000 != 0
+    def owned? = uid == Process.euid
+    def world_writable? = mode & 0o002 != 0 ? mode & 0o777 : nil
+    def world_readable? = mode & 0o004 != 0 ? mode & 0o777 : nil
+    def <=>(other) = mtime <=> other.mtime
+
+    def ftype
+      { 0o100000 => "file", 0o040000 => "directory", 0o120000 => "link", 0o010000 => "fifo",
+        0o140000 => "socket", 0o020000 => "characterSpecial", 0o060000 => "blockSpecial" }.fetch(__type, "unknown")
+    end
+
+    def inspect = "#<File::Stat mode=0#{mode.to_s(8)} size=#{size} uid=#{uid} gid=#{gid}>"
+  end
+
+  def self.stat(path) = Stat.new(path, true)
+  def self.lstat(path) = Stat.new(path, false)
+  def self.ftype(path) = Stat.new(path, false).ftype
+end
+
+class Time
+  # What `require "time"` gives in Ruby, for the ISO 8601 forms scripts write and read (0.9.0):
+  # Time#iso8601 / #xmlschema, Time.iso8601 and Time.parse of "2024-01-02", "2024-01-02 03:04",
+  # "2024-01-02T03:04:05.123+01:00", "...Z". Another form is ArgumentError (Time.parse in Ruby
+  # knows many more; rsh says so instead of guessing).
+  def iso8601(digits = 0)
+    frac = ""
+    if digits > 0
+      us = format("%06d", usec)
+      frac = "." + (digits <= 6 ? us[0, digits] : us + "0" * (digits - 6))
+    end
+    zone = utc? ? "Z" : strftime("%z").sub(/(\d\d)(\d\d)\z/, '\1:\2')
+    strftime("%Y-%m-%dT%H:%M:%S") + frac + zone
+  end
+
+  def xmlschema(digits = 0) = iso8601(digits)
+
+  def self.parse(text)
+    m = /\A\s*(\d{4})-(\d\d)-(\d\d)(?:[T ](\d\d):(\d\d)(?::(\d\d)(?:\.(\d+))?)?)?\s*(Z|[+-]\d\d:?\d\d)?\s*\z/.match(text.to_s)
+    raise ArgumentError, "no time information in #{text.inspect} (rsh reads ISO 8601: 2024-01-02T03:04:05+01:00)" unless m
+    parts = [m[1], m[2], m[3], m[4] || 0, m[5] || 0, m[6] || 0].map(&:to_i)
+    us = m[7] ? (m[7] + "000000")[0, 6].to_i : 0
+    zone = m[8]
+    return Time.local(*parts, us) unless zone
+    t = Time.utc(*parts, us)
+    return t if zone == "Z"
+    sign = zone[0] == "-" ? -1 : 1
+    digits = zone.delete(":")
+    off = sign * (digits[1, 2].to_i * 3600 + digits[3, 2].to_i * 60)
+    (t - off).localtime
+  end
+
+  def self.iso8601(text) = parse(text)
+end

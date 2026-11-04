@@ -32,6 +32,8 @@ EXPLAIN_SHA=926c120c89eb747ea34d65027d122a628869a3d784512c5e04681c3f69f55fee
 WORDS_SHA=06f3f08a2192c35b08799e82141a30efb8198a9e03227c84f15e2a8d62a2d76a
 BUILTINS_SHA=76e3078a9e447355f0e2f4cd969b5e2939a4f548e9e74b3c9b042285ad16e166
 BUILD_SHA=1b2c61f0bdeb43241be9020716011ec8d7293d49dd15f805c7009fcb4de1ef6a
+# 0.9.0: the names of the built-in Sh, FileUtils, Find and Shellwords (docs/design.md S8).
+STD_SHA=484b24ed31efebaf034d597878d3ed46d2d74dfe912513ff996a68baeae5177a
 
 ok() { # label condition...
 	label=$1
@@ -139,6 +141,36 @@ digest WORDS_SHA "$WORDS_SHA" "$(echo "$words" | sha)"
 builtins=$(sed -n '/^static const char\* const BUILTINS\[\] = {/,/nullptr};/p' "$top/src/exec.cpp" | grep -o '"[^"]*"' | tr -d '"')
 digest BUILTINS_SHA "$BUILTINS_SHA" "$(echo "$builtins" | sha)"
 ok "sleep is a command" [ "$(printf 'sleep 0\n' >s.rsh && "$rsh" --explain s.rsh | sed -n 2p | cut -c6)" = C ]
+
+# 1 (0.9.0): how every test script and example is read is frozen, file by file. tests/frozen.explain
+# holds "SHA256  FILE" of `rsh --explain FILE` for each; a file not in the list is not checked (a new
+# test adds its line with --print-explain, an existing line only changes in a major version).
+if [ "${CONTRACT_PRINT_EXPLAIN:-0}" = 1 ]; then
+	for f in "$top"/tests/golden/*.rsh "$top"/tests/golden/*.rb "$top"/tests/golden/*.lib "$top"/tests/examples/*.rsh "$top"/examples/meta/*.rsh; do
+		echo "$("$rsh" --explain "$f" 2>/dev/null | sha)  ${f#"$top"/}"
+	done
+	exit 0
+fi
+changed=
+while read -r want f; do
+	[ -f "$top/$f" ] || { changed="$changed $f(missing)"; continue; }
+	[ "$("$rsh" --explain "$top/$f" 2>/dev/null | sha)" = "$want" ] || changed="$changed $f"
+done <"$here/frozen.explain"
+ok "every frozen script reads as before (tests/frozen.explain)${changed:+:$changed}" [ -z "$changed" ]
+
+# 1 (0.9.0): the built-in helpers' names are frozen (docs/design.md S8); Rsh.last_pid (D2) is there.
+std=$("$rsh" -c 'Rsh.__std; [Sh, FileUtils, Find, Shellwords].each { |m| puts "#{m}: #{m.instance_methods(false).reject { |x| x.to_s.start_with?("__") }.sort.join(" ")}" }; puts "Sh.find: #{Sh.instance_method(:find).parameters.inspect}"; puts "Sh.tmpdir: #{Sh.instance_method(:tmpdir).parameters.inspect}"; puts "String: #{[:shellescape, :shellsplit].select { |x| String.method_defined?(x) }.inspect}"; puts "Array: #{Array.method_defined?(:shelljoin)}"; puts "Dir.mktmpdir: #{Dir.method(:mktmpdir).parameters.inspect}"; puts "Rsh.last_pid: #{Rsh.respond_to?(:last_pid)}"')
+digest STD_SHA "$STD_SHA" "$(echo "$std" | sha)"
+ok "Rsh.last_pid" [ "$("$rsh" -c 'p Rsh.last_pid')" = nil ]
+
+# 3, 9 (0.9.0): the version is one number everywhere.
+ver=$(cat "$top/VERSION")
+ok "rsh -v is VERSION" [ "$("$rsh" -v)" = "rsh $ver" ]
+ok "packaging.PKGBUILD pkgver is VERSION" grep -qx "pkgver=$ver" "$top/packaging.PKGBUILD"
+ok "CHANGELOG.md has a section for VERSION" grep -qx "## $ver" "$top/CHANGELOG.md"
+
+# 5 (0.9.0): a script on standard input is named "-" in messages, as a file is.
+ok "stdin script: rsh: -:LINE: PROG exited N" err_is "rsh: -:1: sh exited 3" sh -c "printf 'sh -c \"exit 3\"\n' | \"$rsh\""
 
 # 7. Files.
 ok "history file name" grep -q '"/rsh/history"' "$top/src/main.cpp"

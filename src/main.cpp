@@ -30,6 +30,7 @@
 using namespace rsh;
 
 extern "C" const uint8_t rsh_prelude_more[];
+extern "C" const uint8_t rsh_prelude_std[];
 
 namespace {
 
@@ -216,10 +217,31 @@ mrb_value m_more(mrb_state* mrb, mrb_value) {
     return mrb_nil_value();
 }
 
+// src/prelude_std.rb (0.9.0), the first time Sh, FileUtils, Find, Shellwords or Dir.mktmpdir is
+// used: at the top level, as prelude_more.
+bool std_loaded = false;
+mrb_value m_std(mrb_state* mrb, mrb_value) {
+    if (std_loaded) return mrb_false_value();
+    std_loaded = true;
+    mrb_irep* irep = mrb_read_irep(mrb, rsh_prelude_std);
+    if (!irep) mrb_raise(mrb, E_SCRIPT_ERROR, "rsh: src/prelude_std.rb did not load");
+    RProc* proc = mrb_proc_new(mrb, irep);
+    mrb_irep_decref(mrb, irep);
+    MRB_PROC_SET_TARGET_CLASS(proc, mrb->object_class);
+    mrb_top_run(mrb, proc, mrb_top_self(mrb), 0);
+    if (mrb->exc) {
+        mrb_value e = mrb_obj_value(mrb->exc);
+        mrb->exc = nullptr;
+        mrb_exc_raise(mrb, e);
+    }
+    return mrb_true_value();
+}
+
 // What the program adds to the interpreter rt_open made (the prelude has stand-ins for these).
 void program_methods(mrb_state* mrb) {
     RClass* r = mrb_module_get(mrb, "Rsh");
     mrb_define_module_function(mrb, r, "__more", m_more, MRB_ARGS_NONE());
+    mrb_define_module_function(mrb, r, "__std", m_std, MRB_ARGS_NONE());
     mrb_define_module_function(mrb, r, "__sigp", sig::m_sigp, MRB_ARGS_NONE());
     mrb_define_module_function(mrb, r, "__sig_take", sig::m_sig_take, MRB_ARGS_NONE());
     mrb_define_module_function(mrb, r, "__trap", sig::m_trap, MRB_ARGS_REQ(2));

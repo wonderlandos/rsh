@@ -1,0 +1,92 @@
+mode: shell
+methods: greet
+   1 R  # 0.9.0, the CTO's decisions D1-D3 (docs/STABILITY.md section 10).
+   2 R  # D1: a pattern with no match and a redirect that cannot open are a failed command, status 1:
+   3 R  # false in a condition (a no-match says nothing there; an open failure says why on standard error),
+   4 R  # Rsh::Failed outside one, with the reason as its message.
+   5 C  ls *.zzz || echo "no match: the || ran, status $?"
+   6 C  cat < missing.txt || echo "cannot open: the || ran"
+   7 C  p [(ls *.zzz), $?.exitstatus, $?.statuses]
+   8 C  if cat < missing.txt
+   9 R    puts "never"
+  10 R  else
+  11 R    puts "if: false"
+  12 R  end
+  13 R  begin
+  14 C    rm *.tmp
+  15 R  rescue Rsh::Failed => e
+  16 R    p [e.class, e.message, e.status.exitstatus, e.argv]
+  17 R  end
+  18 R  begin
+  19 C    echo x > no-such-folder/f
+  20 R  rescue Rsh::Failed => e
+  21 R    p [e.message, e.status.exitstatus]
+  22 R  end
+  23 C  ! ls *.zzz && echo "! turns the no-match round"
+  24 R  relaxed!
+  25 C  ls *.zzz
+  26 R  p $?.exitstatus
+  27 R  relaxed!(false)
+  28 R  # nil, NUL and an Array inside a word stay mistakes in the line (Rsh::Error), in a condition too.
+  29 R  begin
+  30 R    x = nil
+  31 C    echo #{x} || echo never
+  32 R  rescue Rsh::Error => e
+  33 R    p e.class
+  34 R  end
+  35 R  begin
+  36 R    x = "a\0b"
+  37 C    echo #{x} || echo never
+  38 R  rescue Rsh::Error => e
+  39 R    p e.class
+  40 R  end
+  41 R  begin
+  42 R    list = %w[a b]
+  43 C    echo -x=#{list} || echo never
+  44 R  rescue Rsh::Error => e
+  45 R    p e.class
+  46 R  end
+  47 R  # D1 in a pipeline: the stage that cannot start is the failure; Rsh::Failed#argv is that command.
+  48 C  echo x | grep -q x *.zzz || echo "pipeline: the || ran"
+  49 R  begin
+  50 C    echo x | cat -n > no-such-folder/f
+  51 R  rescue Rsh::Failed => e
+  52 R    p [e.message, e.argv]
+  53 R  end
+  54 R  # D1 and `&`: nothing starts in the background and the script stops (as 0.1.4), even after ||.
+  55 R  begin
+  56 C    sleep 5 > no-such-folder/f &
+  57 R  rescue Rsh::Failed => e
+  58 R    p ["bg", e.message, e.argv, Rsh.last_pid]
+  59 R  end
+  60 R  begin
+  61 C    echo *.zzz &
+  62 R  rescue Rsh::Failed => e
+  63 R    p ["bg", e.message]
+  64 R  end
+  65 R  # D2: Rsh.last_pid is the pid of the last `cmd &` (nil before); wait takes a pid as sh does.
+  66 R  p Rsh.last_pid
+  67 C  sh -c 'exit 3' &
+  68 R  pid = Rsh.last_pid
+  69 R  p pid.is_a?(Integer)
+  70 C  sh -c 'test "$1" = "$2"' x $! #{pid}
+  71 C  ok = (wait #{pid})
+  72 R  p [ok, $?.exitstatus]
+  73 R  # D2 with job numbers: `wait %N` is job N, `wait PID` the job of that process (a pid wins).
+  74 C  sleep 0.1 &
+  75 C  sh -c 'exit 5' &
+  76 C  ok = (wait %2)
+  77 R  p [ok, $?.exitstatus]
+  78 C  wait %1
+  79 R  # D3: a `source <literal path>` file is read ahead, relative to this script's folder (when it is
+  80 R  # read and when it runs), so its methods are Ruby at a bare call; a path made at run time keeps the
+  81 R  # current folder.
+  82 C  source r9_decisions.lib
+  83 R  greet "world"
+  84 R  lib = "#{__dir__}/r9_decisions.lib"
+  85 C  source #{lib}
+  86 R  greet("again")
+  87 C  cd /
+  88 C  source r9_decisions.lib
+  89 R  greet "from /, the script's folder still"
+  90    

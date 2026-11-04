@@ -1,0 +1,1 @@
+rsh: export: RSH_NOT_SET_ZZ is not set: write export RSH_NOT_SET_ZZ=value (export RSH_NOT_SET_ZZ=#{RSH_NOT_SET_ZZ} for a Ruby value)

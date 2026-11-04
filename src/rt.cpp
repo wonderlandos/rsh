@@ -16,11 +16,14 @@
 #include <mruby/proc.h>
 #include <mruby/string.h>
 #include <mruby/variable.h>
+#include <mruby/io.h>
 #include <pcre2.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -122,10 +125,27 @@ mrb_value outcome(mrb_state* mrb, const Outcome& oc) {
     mrb_ary_push(mrb, r, str(mrb, oc.tail));
     mrb_ary_push(mrb, r, mrb_bool_value(oc.interrupted));
     mrb_ary_push(mrb, r, str(mrb, oc.out));
+    mrb_ary_push(mrb, r, oc.failed_msg.empty() ? mrb_nil_value() : str(mrb, oc.failed_msg));
     return r;
 }
 
 // Rsh.__exec(line, values, flags): flags 1 condition, 2 capture, 4 relaxed.
+extern "C" struct mrb_data_type mrb_io_type;
+
+// `answer = gets`, then a command that reads standard input too (`rsh job.rsh < list.txt`): the
+// interpreter has read ahead up to 4 KB into $stdin's buffer, and the command started after the
+// buffered lines (0.9.0). When standard input is a file the read-ahead is given back (lseek), so
+// the command and a later gets see the same rest. A pipe cannot be given back (docs/rsh.md).
+void stdin_give_back(mrb_state* mrb) {
+    mrb_value in = mrb_gv_get(mrb, mrb_intern_lit(mrb, "$stdin"));
+    if (!mrb_data_p(in) || DATA_TYPE(in) != &mrb_io_type) return;
+    mrb_io* f = static_cast<mrb_io*>(DATA_PTR(in));
+    if (!f || f->fd != 0 || !f->buf || f->buf->len <= 0) return;
+    if (lseek(0, -off_t(f->buf->len), SEEK_CUR) < 0) return;
+    f->buf->start = 0;
+    f->buf->len = 0;
+}
+
 mrb_value m_exec(mrb_state* mrb, mrb_value) {
     mrb_int idx, flags;
     mrb_value vals;
@@ -136,6 +156,7 @@ mrb_value m_exec(mrb_state* mrb, mrb_value) {
     mrb_value result = mrb_nil_value(), errmsg = mrb_nil_value(), exc = mrb_nil_value();
     if (idx < 0 || size_t(idx) >= table().size()) mrb_raise(mrb, E_ARGUMENT_ERROR, "no such command line");
     mrb_value saved = host.vals;
+    stdin_give_back(mrb);
     {
         std::vector<Value> vs;
         for (mrb_int k = 0; k < RARRAY_LEN(vals); ++k) {
@@ -178,6 +199,7 @@ mrb_value m_argv(mrb_state* mrb, mrb_value) {
     mrb_get_args(mrb, "Ai", &av, &flags);
     mrb_value result = mrb_nil_value(), errmsg = mrb_nil_value();
     if (RARRAY_LEN(av) == 0) mrb_raise(mrb, E_ARGUMENT_ERROR, "no program given");
+    stdin_give_back(mrb);
     {
         std::vector<std::string> a;
         for (mrb_int k = 0; k < RARRAY_LEN(av); ++k) {
@@ -293,6 +315,59 @@ mrb_value m_file_mtime(mrb_state* mrb, mrb_value) {
                        mrb_int_value(mrb, (mrb_int)(st.st_mtim.tv_nsec / 1000)));
 }
 
+// 0.9.0: what a script asks about its files and its user, without a program (`test -x`, `id -u`).
+// File.readable?/writable?/executable?/owned? use the effective ids, as Ruby does (eaccess).
+template <int MODE>
+mrb_value m_file_access(mrb_state* mrb, mrb_value) {
+    mrb_value path;
+    mrb_get_args(mrb, "S", &path);
+    return mrb_bool_value(faccessat(AT_FDCWD, mrb_string_cstr(mrb, path), MODE, AT_EACCESS) == 0);
+}
+mrb_value m_file_owned(mrb_state* mrb, mrb_value) {
+    mrb_value path;
+    mrb_get_args(mrb, "S", &path);
+    struct stat st;
+    return mrb_bool_value(stat(mrb_string_cstr(mrb, path), &st) == 0 && st.st_uid == geteuid());
+}
+// Rsh.__stat(path, follow): [mode, size, uid, gid, nlink, ino, dev, atime, mtime, ctime (each
+// seconds, microseconds), rdev, blksize, blocks] for File::Stat (src/prelude_more.rb); Errno as Ruby.
+mrb_value m_stat(mrb_state* mrb, mrb_value) {
+    mrb_value path;
+    mrb_bool follow;
+    mrb_get_args(mrb, "Sb", &path, &follow);
+    struct stat st;
+    const char* p = mrb_string_cstr(mrb, path);
+    if ((follow ? stat(p, &st) : lstat(p, &st)) != 0) mrb_sys_fail(mrb, p);
+    mrb_value a = mrb_ary_new_capa(mrb, 16);
+    auto put = [&](long long v) { mrb_ary_push(mrb, a, mrb_int_value(mrb, (mrb_int)v)); };
+    put(st.st_mode), put(st.st_size), put(st.st_uid), put(st.st_gid), put(st.st_nlink), put(st.st_ino), put(st.st_dev);
+    put(st.st_atim.tv_sec), put(st.st_atim.tv_nsec / 1000), put(st.st_mtim.tv_sec), put(st.st_mtim.tv_nsec / 1000);
+    put(st.st_ctim.tv_sec), put(st.st_ctim.tv_nsec / 1000), put(st.st_rdev), put(st.st_blksize), put(st.st_blocks);
+    return a;
+}
+// Rsh.__touch(path) (0.9.0, Sh.touch / FileUtils.touch): makes the file, or sets its times to now.
+mrb_value m_touch(mrb_state* mrb, mrb_value) {
+    mrb_value path;
+    mrb_get_args(mrb, "S", &path);
+    const char* p = mrb_string_cstr(mrb, path);
+    int fd = open(p, O_WRONLY | O_CREAT | O_NOCTTY | O_CLOEXEC, 0666);
+    if (fd < 0 && errno != EISDIR) mrb_sys_fail(mrb, p);
+    if (fd >= 0) close(fd);
+    if (utimensat(AT_FDCWD, p, nullptr, 0) != 0) mrb_sys_fail(mrb, p);
+    return mrb_nil_value();
+}
+
+// Rsh.last_pid (0.9.0, D2): the process id of the last `cmd &`, nil before the first (Ruby's $! is
+// its exception variable; `$!` in a command line is the same number).
+mrb_value m_last_pid(mrb_state* mrb, mrb_value) {
+    pid_t p = shell().last_bg;
+    return p > 0 ? mrb_int_value(mrb, (mrb_int)p) : mrb_nil_value();
+}
+mrb_value m_uid(mrb_state* mrb, mrb_value) { return mrb_int_value(mrb, (mrb_int)getuid()); }
+mrb_value m_euid(mrb_state* mrb, mrb_value) { return mrb_int_value(mrb, (mrb_int)geteuid()); }
+mrb_value m_gid(mrb_state* mrb, mrb_value) { return mrb_int_value(mrb, (mrb_int)getgid()); }
+mrb_value m_egid(mrb_state* mrb, mrb_value) { return mrb_int_value(mrb, (mrb_int)getegid()); }
+
 // IO.popen and IO._popen: the interpreter's version runs its text with /bin/sh. rsh never hands
 // text to a shell (audit C2), so these only say what to write instead. The interpreter is also
 // built without popen (build_config.rb), so no code that could do it is in the program.
@@ -377,6 +452,7 @@ mrb_value load_protected(mrb_state* mrb, mrb_value code, mrb_ccontext* c) {
 void load_text(mrb_state* mrb, const std::string& src, const std::string& file, bool rsh_syntax, bool& syntax_error) {
     syntax_error = false;
     mrb_value code = mrb_nil_value();
+    int ai = mrb_gc_arena_save(mrb);  // before the code string (0.9.0: each source kept its text)
     {
         Known k;
         if (rsh_syntax) {
@@ -387,6 +463,7 @@ void load_text(mrb_state* mrb, const std::string& src, const std::string& file, 
                 for (auto& d : r.diags)
                     if (!d.warning) std::fprintf(stderr, "rsh: %s:%d: %s\n", file.c_str(), d.line, d.msg.c_str());
                 syntax_error = true;
+                mrb_gc_arena_restore(mrb, ai);
                 return;
             }
             code = str(mrb, r.ruby);
@@ -395,7 +472,6 @@ void load_text(mrb_state* mrb, const std::string& src, const std::string& file, 
     mrb_ccontext* c = mrb_ccontext_new(mrb);
     mrb_ccontext_filename(mrb, c, file.c_str());
     c->capture_errors = TRUE;
-    int ai = mrb_gc_arena_save(mrb);
     host.files.push_back(file);
     load_protected(mrb, code, c);
     host.files.pop_back();
@@ -528,6 +604,27 @@ mrb_value m_declare(mrb_state* mrb, mrb_value) {
 
 int report(mrb_state* mrb, mrb_value exc);
 
+// A syntax error on a line that starts with a Ruby word that is also a common program (`printf "%s\n"
+// x | sort | head`): the line is Ruby by rule 4, and the compiler's message alone does not say why
+// (0.9.0).
+std::string ruby_word_hint(const std::string& src, int line) {
+    size_t b = 0;
+    for (int n = 1; n < line && b != std::string::npos; ++n) {
+        b = src.find('\n', b);
+        if (b != std::string::npos) ++b;
+    }
+    if (b == std::string::npos || b >= src.size()) return "";
+    while (b < src.size() && (src[b] == ' ' || src[b] == '\t')) ++b;
+    size_t e = b;
+    while (e < src.size() && (std::isalnum((unsigned char)src[e]) || src[e] == '_')) ++e;
+    std::string w = src.substr(b, e - b);
+    static const char* const programs[] = {"printf", "open", "format", "test", "exec", "eval", "send", "method", "trap", "p"};
+    bool hit = false;
+    for (const char* x : programs) hit = hit || w == x;
+    if (!hit || !is_ruby_word(w) || e >= src.size() || src[e] != ' ') return "";
+    return " (`" + w + "` at the start of a line is Ruby's " + w + "; for the program write $ " + w + " ...)";
+}
+
 int RtHost::source(const std::vector<std::string>& a) {
     if (a.size() < 2) {
         std::fprintf(stderr, "rsh: source needs a file\n");
@@ -539,12 +636,34 @@ int RtHost::source(const std::vector<std::string>& a) {
         std::fprintf(stderr, "rsh: source: %s: %s\n", a[1].c_str(), std::strerror(errno));
         return 1;
     }
+    // `source lib.rsh x y`: ARGV is [x, y] while the file runs, as $1 $2 in sh (0.9.0; the words
+    // were dropped); without words the file sees the script's ARGV.
+    mrb_value argv = mrb_const_get(mrb, mrb_obj_value(mrb->object_class), mrb_intern_lit(mrb, "ARGV"));
+    mrb_value kept = mrb_nil_value();
+    if (a.size() > 2 && mrb_array_p(argv)) {
+        kept = mrb_ary_new_from_values(mrb, RARRAY_LEN(argv), RARRAY_PTR(argv));
+        mrb_gc_protect(mrb, kept);
+        mrb_ary_clear(mrb, argv);
+        for (size_t k = 2; k < a.size(); ++k) mrb_ary_push(mrb, argv, str(mrb, a[k]));
+    }
     bool syn;
     load_text(mrb, body, a[1], wants_shell_layer(a[1], body), syn);
+    if (mrb_array_p(kept)) mrb_ary_replace(mrb, argv, kept);
     if (syn) return 2;
     if (mrb->exc) {  // reported here, as `rsh: FILE:LINE: message (Class)`; the command line only fails
         mrb_value e = mrb_obj_value(mrb->exc);
         mrb->exc = nullptr;
+        if (!std::strcmp(mrb_obj_classname(mrb, e), "SyntaxError")) {
+            // the compiler says "line N: ...": the sourced file's name goes in front (0.9.0: the
+            // message was `rsh: line 1: ...`, with no file)
+            mrb_value msg = mrb_funcall(mrb, e, "message", 0);
+            if (mrb->exc) mrb->exc = nullptr;
+            std::string m = mrb_string_p(msg) ? cxx(msg) : "syntax error";
+            if (m.compare(0, 5, "line ") == 0) {
+                std::fprintf(stderr, "rsh: %s:%s%s\n", a[1].c_str(), m.c_str() + 5, ruby_word_hint(body, std::atoi(m.c_str() + 5)).c_str());
+                return 2;
+            }
+        }
         int st = report(mrb, e);
         return st ? st : 1;
     }
@@ -1606,7 +1725,7 @@ std::string where(mrb_state* mrb, mrb_value exc) {
         mrb_value e = mrb_ary_ref(mrb, bt, k);
         if (!mrb_string_p(e)) continue;
         std::string s = cxx(e);
-        if (s.empty() || s[0] == '(' || s.compare(0, 2, "-:") == 0) continue;
+        if (s.empty() || s[0] == '(') continue;  // the built-in part; a script read from standard input is "-" (0.9.0)
         size_t in = s.find(":in ");
         if (in != std::string::npos) s = s.substr(0, in);
         return s;
@@ -1674,6 +1793,7 @@ mrb_state* rt_open(const std::string& script, const std::vector<std::string>& ar
     if (!mrb) return nullptr;
     host.mrb = mrb;
     host.argv = args;
+    if (shell().start_dir.empty()) shell().start_dir = current_dir();
     RClass* r = mrb_define_module(mrb, "Rsh");
     mrb_define_module_function(mrb, r, "__exec", m_exec, MRB_ARGS_REQ(3));
     mrb_define_module_function(mrb, r, "__argv", m_argv, MRB_ARGS_REQ(2));
@@ -1696,7 +1816,20 @@ mrb_state* rt_open(const std::string& script, const std::vector<std::string>& ar
     mrb_define_module_function(mrb, r, "__declare", m_declare, MRB_ARGS_REQ(1));
     mrb_define_module_function(mrb, r, "__regexp", m_regexp, MRB_ARGS_NONE());
     mrb_define_module_function(mrb, r, "__home", m_home, MRB_ARGS_REQ(1));
-    mrb_define_class_method(mrb, mrb_class_get(mrb, "File"), "mtime", m_file_mtime, MRB_ARGS_REQ(1));
+    RClass* file = mrb_class_get(mrb, "File");
+    mrb_define_class_method(mrb, file, "mtime", m_file_mtime, MRB_ARGS_REQ(1));
+    mrb_define_class_method(mrb, file, "readable?", m_file_access<R_OK>, MRB_ARGS_REQ(1));
+    mrb_define_class_method(mrb, file, "writable?", m_file_access<W_OK>, MRB_ARGS_REQ(1));
+    mrb_define_class_method(mrb, file, "executable?", m_file_access<X_OK>, MRB_ARGS_REQ(1));
+    mrb_define_class_method(mrb, file, "owned?", m_file_owned, MRB_ARGS_REQ(1));
+    mrb_define_module_function(mrb, r, "__stat", m_stat, MRB_ARGS_REQ(2));
+    mrb_define_module_function(mrb, r, "last_pid", m_last_pid, MRB_ARGS_NONE());
+    mrb_define_module_function(mrb, r, "__touch", m_touch, MRB_ARGS_REQ(1));
+    RClass* proc_mod = mrb_define_module(mrb, "Process");
+    mrb_define_module_function(mrb, proc_mod, "uid", m_uid, MRB_ARGS_NONE());
+    mrb_define_module_function(mrb, proc_mod, "euid", m_euid, MRB_ARGS_NONE());
+    mrb_define_module_function(mrb, proc_mod, "gid", m_gid, MRB_ARGS_NONE());
+    mrb_define_module_function(mrb, proc_mod, "egid", m_egid, MRB_ARGS_NONE());
     re_names.owner = nullptr;  // a new interpreter: its own symbols
     RClass* re = mrb_define_class(mrb, "Regexp", mrb->object_class);
     MRB_SET_INSTANCE_TT(re, MRB_TT_CDATA);
@@ -1749,7 +1882,8 @@ int rt_run(mrb_state* mrb, const std::string& src, const std::string& file, bool
             mrb_value msg = mrb_funcall(mrb, e, "message", 0);
             std::string m = mrb_string_p(msg) ? cxx(msg) : "syntax error";
             // Rsh.eval's errors name their own text, "(rsh eval):1: ..." (audit L-9)
-            if (m.compare(0, 5, "line ") == 0) std::fprintf(stderr, "rsh: %s:%s\n", file.c_str(), m.c_str() + 5);
+            if (m.compare(0, 5, "line ") == 0)
+                std::fprintf(stderr, "rsh: %s:%s%s\n", file.c_str(), m.c_str() + 5, ruby_word_hint(src, std::atoi(m.c_str() + 5)).c_str());
             else std::fprintf(stderr, "rsh: %s\n", m.c_str());
             return 2;
         }
@@ -1763,6 +1897,8 @@ int rt_eval(mrb_state* mrb, const std::string& src, Known& known, bool& exited, 
     incomplete = false;
     mrb_value code = mrb_nil_value();
     bool commands = false;
+    std::string ruby_text;
+    size_t first = table().size(), after = 0;
     {
         Known trial = known;
         size_t before = table().size();
@@ -1801,15 +1937,19 @@ int rt_eval(mrb_state* mrb, const std::string& src, Known& known, bool& exited, 
         }
         known = trial;
         script_methods().insert(known.methods.begin(), known.methods.end());
+        ruby_text = std::move(r.ruby);
+        after = table().size();
         commands = !r.marks.empty();
-        code = str(mrb, r.ruby);
     }
+    // The arena is saved before the code string is made (0.9.0): made after the save, each input
+    // left its string and an arena slot behind, about 250 bytes a line in a long session.
+    int ai = mrb_gc_arena_save(mrb);
+    code = str(mrb, ruby_text);
     if (!repl_cxt) {
         repl_cxt = mrb_ccontext_new(mrb);
         mrb_ccontext_filename(mrb, repl_cxt, "(rsh)");
         repl_cxt->capture_errors = TRUE;
     }
-    int ai = mrb_gc_arena_save(mrb);
     mrb_value v = mrb_load_nstring_cxt(mrb, RSTRING_PTR(code), RSTRING_LEN(code), repl_cxt);
     int status = 0;
     if (mrb->exc) {
@@ -1824,6 +1964,15 @@ int rt_eval(mrb_state* mrb, const std::string& src, Known& known, bool& exited, 
         std::fflush(stdout);
     } else if (commands) status = shell().last_status;
     mrb_gc_arena_restore(mrb, ai);
+    // The command lines of this input are not needed once it ran, unless code that outlives it
+    // can hold them (a method, a block, a proc) or the run read more lines (source, Rsh.eval). They
+    // were kept for ever: about 600 bytes per command typed (0.9.0, the 10,000-command check).
+    bool may_keep = false;
+    for (const char* w : {"def", "do", "->", "proc", "lambda", "method", "class", "module", "Struct", "Data"})
+        may_keep = may_keep || ruby_text.find(w) != std::string::npos;
+    for (size_t k = ruby_text.find('{'); !may_keep && k != std::string::npos; k = ruby_text.find('{', k + 1))
+        may_keep = k == 0 || ruby_text[k - 1] != '#';  // a block or a Hash; #{...} is a value
+    if (!may_keep && table().size() == after) table().resize(first);
     return status;
 }
 
@@ -1849,8 +1998,9 @@ int rt_check(mrb_state* mrb, const std::string& src, const std::string& file, bo
     if (!p) bad = 2;
     else {
         for (size_t e = 0; e < p->nerr && e < 10; ++e) {
-            std::fprintf(stderr, "%s:%d:%d: %s\n", file.c_str(), p->error_buffer[e].lineno, p->error_buffer[e].column,
-                         p->error_buffer[e].message ? p->error_buffer[e].message : "syntax error");
+            std::fprintf(stderr, "%s:%d:%d: %s%s\n", file.c_str(), p->error_buffer[e].lineno, p->error_buffer[e].column,
+                         p->error_buffer[e].message ? p->error_buffer[e].message : "syntax error",
+                         ruby_word_hint(src, p->error_buffer[e].lineno).c_str());
             bad = 2;
         }
         mrb_parser_free(p);
@@ -1937,6 +2087,9 @@ bool rt_prompt(mrb_state* mrb, std::string& out) {
     return true;
 }
 
-void rt_add_history(const std::string& line) { host.hist.push_back(line); }
+void rt_add_history(const std::string& line) {
+    host.hist.push_back(line);
+    if (host.hist.size() > 6000) host.hist.erase(host.hist.begin(), host.hist.begin() + 1000);  // as Editor::add
+}
 
 }  // namespace rsh

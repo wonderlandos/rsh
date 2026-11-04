@@ -167,15 +167,15 @@ puts down.empty? ? "all up" : "down: #{down.join(", ")}"
 From the release source (needs a C++20 compiler, `make`, `bison`, `ruby` and `pcre2`; `ruby` is only used while building):
 
 ```sh
-curl -fsSLO https://github.com/wonderlandos/rsh/archive/refs/tags/v0.1.3.tar.gz
-tar -xzf v0.1.3.tar.gz && cd rsh-0.1.3
+curl -fsSLO https://github.com/wonderlandos/rsh/archive/refs/tags/v0.9.0.tar.gz
+tar -xzf v0.9.0.tar.gz && cd rsh-0.9.0
 make && make test
 sudo make install            # /usr/local/bin/rsh and its manual page
 ```
 
 `make` downloads the Ruby it builds in, at one fixed version, and checks its sha256. From a clone: `make`, then `make install PREFIX=/usr` (or `DESTDIR=stage` for a package). `make uninstall` removes both files.
 
-On WolOS: `wol pkg -- -S rsh`. The terminal then offers rsh as its shell, and `wol script run|check|on` accepts `.rsh` and `.rb` files.
+On WolOS: `wol pkg -- -S rsh`. `wol script run|check|on` then accepts `.rsh` and `.rb` files.
 
 The result is one program, under 3 MB, that starts in about 1.2 ms.
 
@@ -187,7 +187,7 @@ The result is one program, under 3 MB, that starts in about 1.2 ms.
 | a Ruby file | `rsh tool.rb`: `.rb` files mix Ruby and commands the same way |
 | a Ruby file as plain Ruby | first line `# rsh: ruby` (after the `#!` line, if any): then no line is a command |
 | one line | `rsh -e 'puts Dir.pwd'` (`-c` is the same) |
-| interactive | `rsh` on a terminal: line editing, Tab completion, history (Ctrl-R), jobs, colours as you type; `rsh -l` as a login shell |
+| interactive | `rsh` on a terminal: line editing, Tab completion, history (Ctrl-R), jobs, colours as you type (`-l` is the same as `-i`; rsh is a script interpreter, not meant as a login shell) |
 | check without running | `rsh -n file`, `rsh --lint file` |
 | see how each line is read | `rsh --explain file` |
 
@@ -244,13 +244,13 @@ end
 
 ## Status
 
-rsh is at 0.1.x: the language rule, the safety rules and the interactive shell are in place and tested (`make test` runs the reader's unit checks, golden scripts, whole example scripts and a terminal session). Not done yet:
+rsh 0.9.0 is the release candidate for 1.0 (with `Sh`, the shell things as Ruby values: `Sh.find("logs", name: "*.log")`, `Sh.rm_rf`, `Sh.tmpdir { }`, and `FileUtils`, `Find`, `Shellwords` built in; [docs/rsh.md](docs/rsh.md)), a version that then changes only for a serious security problem, a large speed-up or a large missing function. [docs/design.md](docs/design.md) is the specification (every rule names its test) and [docs/STABILITY.md](docs/STABILITY.md) the contract: what is frozen (every 1.0 item is met), the known limits and the measured numbers (a 30-minute fuzz of the reader and an hour of the sanitizer build, both clean; no memory growth over 10,000 commands; start-up about 2 ms). Not done yet:
 
-- The Ruby inside rsh is a smaller Ruby: no sockets (use `curl`, `ssh` or `wol`), no big or rational numbers, and `require` knows only `json`, `set`, `time` and `etc`; your own files load with `require_relative`.
+- The Ruby inside rsh is a smaller Ruby: no sockets (use `curl`, `ssh` or `wol`), no big or rational numbers, and `require` knows only `json`, `set`, `time`, `etc`, `fileutils`, `find`, `shellwords` and `tmpdir` (built in); your own files load with `require_relative`.
 - Ctrl-Z, `fg` and `bg` work but are not yet covered by the terminal test.
 - Packages exist for x86_64 only.
 
-Full description: [docs/rsh.md](docs/rsh.md). Design and the options weighed: [docs/design.md](docs/design.md). Manual page: `man rsh` ([rsh.1](rsh.1)). Changes: [CHANGELOG.md](CHANGELOG.md). Brand: [docs/brand.md](docs/brand.md).
+Full description: [docs/rsh.md](docs/rsh.md). Specification: [docs/design.md](docs/design.md); the first design and the options weighed: [docs/design-history.md](docs/design-history.md). Manual page: `man rsh` ([rsh.1](rsh.1)). Changes: [CHANGELOG.md](CHANGELOG.md). Brand: [docs/brand.md](docs/brand.md).
 
 ## Licence
 

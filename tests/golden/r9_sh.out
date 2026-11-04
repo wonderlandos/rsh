@@ -1,0 +1,77 @@
+["logs/.hidden.log", "logs/a.log", "logs/c.txt", "logs/old", "logs/old/b.log"]
+["logs/.hidden.log", "logs/a.log", "logs/old/b.log"]
+["logs/a.log", "logs/c.txt", "logs/old/b.log"]
+["logs/old"]
+["logs/.hidden.log", "logs/a.log", "logs/c.txt"]
+5
+[]
+5
+find: type is :file, :dir or :link
+["ERROR disk"]
+["logs/old/b.log:error net"]
+[true, nil, "/bin/sh"]
+[true, false, true, true, 17, 35]
+"one\ntwo\n"
+["one", "two"]
+"out/copy.txt"
+"750"
+"logs/n.txt"
+true
+"out/moved"
+"out/link"
+"n.txt"
+"600"
+[false, false]
+Errno::ENOENT
+[true, "700"]
+false
+["a", "a/b", "a/b/x", "a/z", "y"]
+false
+FileUtils.rm_rf takes no options in rsh (noop)
+logs
+logs/.hidden.log
+logs/a.log
+logs/c.txt
+logs/n.txt
+7
+"it\\'s\\ \\$HOME"
+["a", "b c", "d e", "f g"]
+"x y\\ z"
+["one", "two"]
+"a\\ b"
+true
+logs/c.txt
+logs/n.txt
+rm_rf: refusing to remove "" (it is /, the current folder, . or ..)
+rm_rf: refusing to remove "/" (it is /, the current folder, . or ..)
+rm_rf: refusing to remove "." (it is /, the current folder, . or ..)
+rm_rf: refusing to remove ".." (it is /, the current folder, . or ..)
+rm_rf: refusing to remove "./" (it is /, the current folder, . or ..)
+rm_rf: refusing to remove "logs/.." (it is /, the current folder, . or ..)
+rm_rf: refusing to remove "logs/." (it is /, the current folder, . or ..)
+rm_rf: refusing to remove "WORK" (it is /, the current folder, . or ..)
+rm_rf: refusing to remove "//" (it is /, the current folder, . or ..)
+FileUtils: rm_rf: refusing to remove "." (it is /, the current folder, . or ..)
+true
+cp: same.txt and same.txt are the same file
+cp: same.txt and same-link are the same file
+"keep me"
+[]
+cp_r: cannot copy tree into itself (tree/sub/tree)
+cp_r: cannot copy tree into itself (tree/tree)
+1
+41
+0
+1
+false
+false
+["boom", false]
+[Errno::ENOENT, "No such file or directory - no-such-dir"]
+[Errno::ENOENT, "No such file or directory - no-such-dir"]
+["a\\\nb"]
+["x", "\\"]
+["a\nb"]
+"a'\n'b"
+"''"
+[true, false, true]
+status: 0

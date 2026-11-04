@@ -383,6 +383,9 @@ void Editor::add(const std::string& entry) {
     if (entry.empty() || (!history.empty() && history.back() == entry)) return;
     if (keep_out_of_history(entry)) return;  // audit M4: not in memory, not in the file
     history.push_back(entry);
+    // In memory as at start-up (load keeps the last 5,000): a long session does not grow for ever
+    // (0.9.0); the file keeps every entry.
+    if (history.size() > 6000) history.erase(history.begin(), history.begin() + 1000);
     if (history_file.empty()) return;
     std::string why;
     int fd = open_own(history_file, O_WRONLY | O_CREAT | O_APPEND, strict, why);

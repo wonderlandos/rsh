@@ -29,4 +29,5 @@ seq 4 5 | { |l| 40.times { Rsh.eval("echo in-eval > /dev/null") }; "eval #{l}" }
 
 # source of a file with many command lines, then the rest of the same line.
 File.write("many.rsh", (1..60).map { |i| "echo many-#{i} > /dev/null\n" }.join)
-source many.rsh && echo after-source || echo not-reached
+many = "many.rsh"  # made at run time, so from the current folder
+source #{many} && echo after-source || echo not-reached

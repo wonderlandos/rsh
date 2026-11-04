@@ -34,12 +34,12 @@ module Rsh
   class Failed < StandardError
     attr_reader :status, :argv, :stderr
 
-    def initialize(status, argv, stderr)
+    def initialize(status, argv, stderr, why = nil)
       @status = status
       @argv = argv
       @stderr = stderr
       how = status.termsig ? "was stopped by signal #{status.termsig}" : "exited #{status.exitstatus}"
-      super("#{argv[0]} #{how}")
+      super(why || "#{argv[0]} #{how}")
     end
   end
 
@@ -107,12 +107,12 @@ module Rsh
     end
   end
 
-  # r: [code, statuses, signal, raise?, argv, error tail, interrupted?, output]
+  # r: [code, statuses, signal, raise?, argv, error tail, interrupted?, output, reason (D1) or nil]
   def self.__finish(r)
     st = Status.new(r[0], r[1], r[2])
     __set_status(st)
     raise Interrupt, "interrupted" if r[6]
-    raise Failed.new(st, r[4], r[5]) if r[3]
+    raise Failed.new(st, r[4], r[5], r[8]) if r[3]
     st
   end
 
@@ -137,6 +137,54 @@ module Rsh
   end
 end
 
+# Sh, FileUtils, Find and Shellwords (0.9.0): stand-ins that load src/prelude_std.rb on first use.
+module Rsh
+  def self.__std = raise(NotImplementedError, "this needs the rsh program (src/prelude_std.rb)")
+
+  # true when this call loaded it (respond_to? then asks again); false when it was there already or
+  # cannot load (a library user without the program)
+  def self.__std_now
+    Rsh.__std
+  rescue NotImplementedError
+    false
+  end
+
+  def self.__std_call(mod, name, args, kw, blk)
+    Rsh.__std
+    raise NoMethodError, "undefined method '#{name}' for #{mod}" unless mod.respond_to?(name)
+    mod.__send__(name, *args, **kw, &blk)
+  end
+end
+
+module Sh
+  def self.method_missing(name, *a, **kw, &b) = Rsh.__std_call(self, name, a, kw, b)
+  def self.respond_to_missing?(name, priv = false) = Rsh.__std_now ? respond_to?(name, priv) : false
+end
+
+module FileUtils
+  def self.method_missing(name, *a, **kw, &b) = Rsh.__std_call(self, name, a, kw, b)
+  def self.respond_to_missing?(name, priv = false) = Rsh.__std_now ? respond_to?(name, priv) : false
+end
+
+module Find
+  def self.method_missing(name, *a, **kw, &b) = Rsh.__std_call(self, name, a, kw, b)
+  def self.respond_to_missing?(name, priv = false) = Rsh.__std_now ? respond_to?(name, priv) : false
+end
+
+module Shellwords
+  def self.method_missing(name, *a, **kw, &b) = Rsh.__std_call(self, name, a, kw, b)
+  def self.respond_to_missing?(name, priv = false) = Rsh.__std_now ? respond_to?(name, priv) : false
+end
+
+class String
+  def shellescape = (Rsh.__std; shellescape)
+  def shellsplit = (Rsh.__std; shellsplit)
+end
+
+class Array
+  def shelljoin = (Rsh.__std; shelljoin)
+end
+
 module Rsh
   # Stand-ins until the program installs its signal handlers (src/main.cpp); a library user that
   # does not (the unit tests) has no signals noted. __more loads src/prelude_more.rb.
@@ -158,6 +206,20 @@ end
 
 class Dir
   def self.home(*a) = (Rsh.__more; home(*a))
+  def self.mktmpdir(*a, &b) = (Rsh.__std; mktmpdir(*a, &b))
+end
+
+class Time
+  def iso8601(*a) = (Rsh.__more; iso8601(*a))
+  def xmlschema(*a) = (Rsh.__more; xmlschema(*a))
+  def self.iso8601(*a) = (Rsh.__more; iso8601(*a))
+  def self.parse(*a) = (Rsh.__more; parse(*a))
+end
+
+class File
+  def self.stat(*a) = (Rsh.__more; stat(*a))
+  def self.lstat(*a) = (Rsh.__more; lstat(*a))
+  def self.ftype(*a) = (Rsh.__more; ftype(*a))
 end
 
 module Process
@@ -279,8 +341,12 @@ module Kernel
   end
 
   def require(name)
+    if %w[fileutils find shellwords tmpdir].include?(name.to_s)
+      Rsh.__std_now  # loaded now, as Ruby's require loads (0.9.0 review)
+      return false
+    end
     return false if %w[json set time etc].include?(name.to_s)
-    raise LoadError, "cannot load #{name}: rsh has its library built in (json, set, time); load your own files with require_relative"
+    raise LoadError, "cannot load #{name}: rsh has its library built in (json, set, time, etc, fileutils, find, shellwords, tmpdir); load your own files with require_relative"
   end
 
   def require_relative(path)

@@ -1,0 +1,5 @@
+mkdir -p logs
+printf 'ok\n' > logs/new.log
+printf 'ERROR old\n' > logs/old.log
+printf 'ERROR older\n' > logs/older.log
+touch -d '10 days ago' logs/old.log logs/older.log

@@ -29,6 +29,7 @@ struct Outcome {
     std::string out;                       // captured standard output
     std::string error;                     // a mistake in the line itself (nil value, no match)
     bool ruby_error = false;               // a Ruby stage raised; the host has the exception
+    std::string failed_msg;                // Rsh::Failed's message when it is not "PROG exited N" (0.9.0, D1)
 };
 
 struct Host {
@@ -57,6 +58,7 @@ struct Shell {
     pid_t pgid = 0;
     int tty = -1;
     std::vector<std::string> dirstack;
+    std::string start_dir;  // the current folder when rsh started (a script's relative name is from there)
 };
 Shell& shell();
 

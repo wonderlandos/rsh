@@ -128,6 +128,41 @@ if [ "$have_names" = 0 ] && [ "$update" = 0 ]; then
 	fi
 fi
 
+# docs/rsh.md (0.9.0): every ```ruby block appears, line for line, in a test script
+# (tests/examples/doc_*.rsh, tests/golden/doc_*.rb); the manual page's example is
+# tests/examples/doc_man.rsh.
+if [ "$have_names" = 0 ] && [ "$update" = 0 ]; then
+	missing=$(awk -v dir="$here" '
+		function slurp(f,   l, s) { s = ""; while ((getline l < f) > 0) s = s l "\n"; close(f); return s }
+		BEGIN {
+			cmd = "ls " dir "/examples/doc_*.rsh " dir "/golden/doc_*.rb 2>/dev/null"
+			while ((cmd | getline f) > 0) all = all slurp(f) "\f"
+			close(cmd)
+		}
+		/^```ruby$/ { inb = 1; blk = ""; start = NR; next }
+		inb && /^```$/ { inb = 0; if (index(all, blk) == 0) print "docs/rsh.md:" start; next }
+		inb { blk = blk $0 "\n" }
+	' "$here/../docs/rsh.md")
+	if [ -z "$missing" ]; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1))
+		echo "FAIL docs/rsh.md: a \`\`\`ruby block with no doc_* test holding it:"
+		echo "$missing"
+	fi
+fi
+
+# rsh.1 (0.9.0): the example of its "Sh" section is tests/examples/doc_sh.rsh, line for line.
+if [ "$have_names" = 0 ] && [ "$update" = 0 ]; then
+	sed -n '/^\.SS Sh:/,/^\.fi/p' "$here/../rsh.1" | sed -n '/^\.nf/,/^\.fi/p' | sed '1d;$d' | sed 's/\\-/-/g; s/\\e/\\/g' >"$tmp/man_sh"
+	if [ -s "$tmp/man_sh" ] && awk -v want="$(cat "$tmp/man_sh")" '{ all = all $0 "\n" } END { exit index(all, want "\n") ? 0 : 1 }' "$here/examples/doc_sh.rsh"; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1))
+		echo "FAIL rsh.1: the Sh example is not tests/examples/doc_sh.rsh"
+	fi
+fi
+
 # Modes on the command line: -n and --ruby follow the same rule as running (shell layer on,
 # `# rsh: ruby` first turns it off), for .rb files as for any other.
 mkdir -p "$tmp/cli"
@@ -190,6 +225,49 @@ if command -v timeout >/dev/null; then
 		'(a=$(date +%s%N); "$rsh" "$tmp/cli/waiting.rsh" >"$tmp/cli/waiting.out" 2>&1 & p=$!; sleep 0.3; kill -TERM $p; wait $p; rc=$?; b=$(date +%s%N); [ $rc = 143 ] && [ "$(cat "$tmp/cli/waiting.out")" = "$(printf "ensure ran\nat_exit ran")" ] && [ $(((b - a) / 1000000)) -lt 1500 ]) 2>/dev/null'
 	cli "TERM in code with no safe point still ends it (the 2-second watchdog)" \
 		'timeout --preserve-status -k 5 -s TERM 0.3 "$rsh" "$tmp/cli/tight.rsh" 2>/dev/null; [ $? = 143 ]'
+fi
+# 0.9.0 (docs/STABILITY.md, "0.9.0 gaps"): the script interpreter's fixes, each failing on 0.1.4.
+cli "G1: a script on standard input names its place as -:LINE" \
+	'[ "$(printf "\nls /nonexistent-rsh-g1 2>/dev/null\n" | "$rsh" 2>&1)" = "rsh: -:2: ls exited 2" ]'
+cli "G1: the same with -s" '[ "$(printf "raise %s\n" "\"g1\"" | "$rsh" -s 2>&1)" = "rsh: -:1: g1 (RuntimeError)" ]'
+cli "G3: \${NAME:-x} is a reader mistake that says what to write (status 2)" \
+	'out=$("$rsh" -c "echo \${NOPE:-x}" 2>&1); [ $? = 2 ] && printf "%s" "$out" | grep -q "is sh: .{...} takes a variable name only; write #{ENV.fetch(\"NOPE\", \"default\")}"'
+printf 'one\ntwo\nthree\n' >"$tmp/cli/lines.txt"
+printf 'l = gets\necho got #{l.chomp}\ncat\np gets\n' >"$tmp/cli/gets_then_cat.rsh"
+cli "G5: gets, then a command reading the same standard input (a file): the command gets the rest" \
+	'[ "$("$rsh" "$tmp/cli/gets_then_cat.rsh" <"$tmp/cli/lines.txt")" = "$(printf "got one\ntwo\nthree\nnil")" ]'
+printf 'printf "b\\na\\n" | sort | head -1\n' >"$tmp/cli/printf_pipe.rsh"
+cli "G10: a syntax error on a line that starts with printf says it is Ruby's printf and how to run the program" \
+	'"$rsh" "$tmp/cli/printf_pipe.rsh" 2>&1 | grep -q "printf_pipe.rsh:1: syntax error.*(.printf. at the start of a line is Ruby.s printf; for the program write \$ printf ...)" && "$rsh" -n "$tmp/cli/printf_pipe.rsh" 2>&1 | grep -q "for the program write"'
+printf 'x = (\n' >"$tmp/cli/bad_lib.rsh"
+cli "G11: a syntax error in a sourced file names that file and its line" \
+	'(cd "$tmp/cli" && "$rsh" -c "source bad_lib.rsh" 2>&1 | grep -q "^rsh: bad_lib.rsh:2: syntax error")'
+# 0.9.0 review (6): a folder that cannot be read is said on standard error and the walk goes on, as
+# find(1) (not as root, who reads every folder).
+if [ "$(id -u)" != 0 ]; then
+	mkdir -p "$tmp/cli/walk/locked/in" "$tmp/cli/walk/open"
+	chmod 0 "$tmp/cli/walk/locked"
+	cli "S6: Sh.find, Sh.du and Find.find report an unreadable folder and go on" \
+		'out=$(cd "$tmp/cli/walk" && "$rsh" -c "p Sh.find(\".\", type: :dir); p Sh.du(\".\") >= 0; Find.find(\".\") { }" 2>&1); printf "%s" "$out" | grep -q "rsh: find: ./locked: Permission denied" && printf "%s" "$out" | grep -q "rsh: du: ./locked: Permission denied" && printf "%s" "$out" | grep -q "\[\"./locked\", \"./open\"\]"'
+	chmod 755 "$tmp/cli/walk/locked"
+fi
+mkfifo "$tmp/cli/fifo" 2>/dev/null && printf 'source fifo\nputs 1\n' >"$tmp/cli/src_fifo.rsh" &&
+	cli "D3: the read-ahead never opens a FIFO (rsh -n would hang)" 'timeout 5 "$rsh" -n "$tmp/cli/src_fifo.rsh" 2>/dev/null'
+# M1: a long interactive session does not grow (an arena slot and a string per input, the command
+# lines of every input kept: about 250 and 600 bytes a line). 20,000 inputs through -i, RSS after
+# 2,000 and after 20,000; under 1 MB of growth (0.1.4: about 7 MB; 0.9.0: about 0.3 MB).
+awk 'BEGIN {
+	rss = "File.read(\"/proc/self/status\")[/VmRSS:\\s+(\\d+)/, 1].to_i"
+	for (i = 1; i <= 20000; i++) {
+		print (i <= 10000 ? "x = 1" : "echo hi > /dev/null")
+		if (i == 2000) print "$m1a = " rss
+	}
+	print "puts \"M1 growth #{" rss " - $m1a}\""
+}' >"$tmp/cli/session.txt"
+# (not on the sanitizer build: its quarantine holds freed memory on purpose)
+if [ -z "${ASAN_OPTIONS:-}" ]; then
+	cli "M1: 20,000 interactive inputs grow the shell by under 1 MB" \
+		'g=$(HOME="$tmp/cli" "$rsh" -i <"$tmp/cli/session.txt" 2>/dev/null | sed -n "s/.*M1 growth //p"); [ -n "$g" ] && [ "$g" -lt 1024 ]'
 fi
 echo "rsh golden: $pass passed, $fail failed"
 [ "$fail" = 0 ]

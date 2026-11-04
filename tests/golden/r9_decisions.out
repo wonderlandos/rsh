@@ -1,0 +1,23 @@
+no match: the || ran, status 1
+cannot open: the || ran
+[false, 1, [1]]
+if: false
+[Rsh::Failed, "no file matches *.tmp", 1, ["rm", "*.tmp"]]
+["no-such-folder/f: No such file or directory", 1]
+! turns the no-match round
+1
+Rsh::Error
+Rsh::Error
+Rsh::Error
+pipeline: the || ran
+["no-such-folder/f: No such file or directory", ["cat", "-n"]]
+["bg", "no-such-folder/f: No such file or directory", ["sleep", "5"], nil]
+["bg", "no file matches *.zzz"]
+nil
+true
+[false, 3]
+[false, 5]
+hello, world
+hello, again
+hello, from /, the script's folder still
+status: 0

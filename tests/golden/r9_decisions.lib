@@ -1,0 +1,2 @@
+# the library of r9_decisions.rsh (read ahead by `source r9_decisions.lib`, decision D3)
+def greet(who) = puts("hello, #{who}")

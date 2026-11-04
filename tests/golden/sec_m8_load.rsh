@@ -28,7 +28,8 @@ File.write("main.rsh", <<~'RUBY')
 RUBY
 load "main.rsh"
 relaxed!
-source sub/bad.rsh
+bad = "sub/bad.rsh"  # made at run time: from the current folder (a written-out path is from this file's)
+source #{bad}
 puts "source: #{$?.exitstatus}"
 relaxed!(false)
 begin

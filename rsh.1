@@ -1,7 +1,7 @@
 .\" SPDX-License-Identifier: GPL-2.0-or-later
-.TH RSH 1 "November 2026" "rsh 0.1" "WolOS"
+.TH RSH 1 "November 2026" "rsh 0.9" "WolOS"
 .SH NAME
-rsh \- Ruby with command lines: a scripting language and a shell
+rsh \- Ruby with command lines: a script interpreter
 .SH SYNOPSIS
 .B rsh
 .RI [ options ]
@@ -173,6 +173,13 @@ A back-quoted text (or
 .BR %x{} )
 runs a command line and gives its output as a String; its status is in
 .BR $? .
+In a command line,
+.B $?
+is the status of the part that ran last
+.RB ( "cmd || echo \(dqfailed: $?\(dq" ),
+while the
+.B #{...}
+values of a line are all read once, when the line starts.
 A command line is also a value:
 .B true
 or
@@ -243,6 +250,15 @@ to go back afterwards),
 .B pwd
 and
 .BR history .
+.B "export NAME=value"
+sets the environment;
+.B "export NAME"
+keeps a NAME that is set and is a mistake for one that is not
+.RB ( FOO=1
+is Ruby in rsh, not the environment: write
+.BR "export FOO=#{FOO}" ).
+.B "source file words"
+runs the file in this process with ARGV set to the words while it runs.
 .SS The Ruby inside
 Ruby with the usual core classes, plus
 .BR JSON ,
@@ -254,10 +270,34 @@ Ruby with the usual core classes, plus
 .BR ENV ,
 .B Process
 and
-.BR Etc .
-There is no
+.BR Etc ,
+with
 .B eval
-and no network library: use a command (curl, wol) for that.
+and
+.BR binding .
+For scripts rsh adds
+.BR File.stat ,
+.BR File.lstat ,
+.BR File.ftype ,
+.BR File.readable? ,
+.BR File.writable? ,
+.BR File.executable? ,
+.BR File.owned? ,
+.BR File.mtime ,
+.BR Process.uid ,
+.BR Process.euid ,
+.BR Process.gid ,
+.BR Process.egid ,
+.BR Dir.home ,
+and, after
+.BR "require \(dqtime\(dq" ,
+.B Time#iso8601
+and
+.B Time.parse
+for ISO 8601 times.
+.B gets
+reads standard input, never the files named in ARGV. There is no network library: use a command
+(curl, wol) for that.
 .B system
 takes separate arguments only. No text ever goes to
 .BR /bin/sh :
@@ -267,6 +307,74 @@ and
 are errors. A NUL byte in an argument, a variable value or a file name is an error.
 .B umask
 takes octal digits only.
+.SS Sh: the shell things as Ruby values
+.B Sh
+is built in (no
+.BR require ;
+it loads when first used). Its helpers work on the files themselves, start no program and give Ruby
+values: an Array of paths to hand to a command (one argument each), a String, true or false.
+.BR "Sh.find(dir, name:, type:, older:, newer:, maxdepth:, hidden:)" ,
+.BR "Sh.grep(pattern, *files)" ,
+.BR Sh.which ,
+.BR Sh.exists? ,
+.BR file? ,
+.BR dir? ,
+.BR age ,
+.BR size ,
+.BR du ,
+.BR read ,
+.BR write ,
+.BR append ,
+.BR lines ,
+.BR mkdir_p ,
+.BR touch ,
+.BR cp ,
+.BR cp_r ,
+.BR mv ,
+.BR ln_s ,
+.BR chmod ,
+.BR rm ,
+.B rm_rf
+and
+.B "Sh.tmpdir { |dir| ... }"
+(removed afterwards). The Ruby-standard
+.B FileUtils
+(no options),
+.BR Find.find ,
+.B Shellwords
+and
+.B Dir.mktmpdir
+are built in too. A command line keeps its meaning:
+.B "find . \-name x"
+is the program.
+.PP
+.nf
+# pack the logs older than a week, then say what is left
+old = Sh.find("logs", name: "*.log", older: 7 * 86400)
+if old.any?
+  tar \-czf old\-logs.tgz #{old}
+  Sh.rm(old)
+end
+puts "packed #{old.size}, kept #{Sh.find("logs", type: :file).size}"
+Sh.tmpdir do |dir|
+  Sh.cp_r("logs", dir)
+  puts Sh.grep("ok", Sh.find(dir, name: "*.log"))
+end
+abort "rsync is missing" unless Sh.which("rsync")
+.fi
+.PP
+A pattern with no match and a redirect that cannot open its file are a failed command with status 1:
+false in a condition
+.RB ( "ls *.log || echo none" ),
+.B Rsh::Failed
+outside one.
+.B Rsh.last_pid
+is the pid of the last
+.BR "cmd &" ;
+.B "wait PID"
+waits for it. A
+.B source
+whose path is written out is read ahead, so its methods are Ruby at a bare call.
 .SS Interactive use
 On a terminal
 .B rsh
@@ -342,7 +450,15 @@ else the status of the failed command that ended it (128+N when a signal N ended
 interrupted; 1 for a Ruby error; 2 for a mistake in the script itself found before it runs, or a
 bad option; 127 if the file cannot be read or a command is not found; 126 if a command cannot run (a
 file that is not executable, a folder given as the script);
-70 if the interpreter cannot start. These are frozen (docs/STABILITY.md in the source).
+70 if the interpreter cannot start. A script that runs to its end is 0, even when its last command
+line was a condition that failed. These are frozen (docs/STABILITY.md in the source).
+.PP
+Every message is one line on standard error that starts with
+.BR rsh: ,
+then the place as
+.BI FILE : LINE :
+when there is one; a script read from standard input is the file
+.BR \- .
 .SH SIGNALS
 TERM, HUP and INT end a script by raising SignalException (Interrupt for INT) at its next
 safe point (a command line, an iteration of

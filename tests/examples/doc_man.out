@@ -1,0 +1,5 @@
+git: <pull> <--ff-only>
+make: <-j4>
+rsync: <-a> <build/> </srv/app/>
+1 errors
+status: 0

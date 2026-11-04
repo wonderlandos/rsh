@@ -4,6 +4,9 @@
 // only at the text, never at PATH, so a file means the same thing on every computer.
 #include "transpile.hpp"
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -230,7 +233,19 @@ struct CmdParser {
             size_t e = s.find('}', i + 2);
             if (e == std::string::npos || e >= lim) return fail("${ without a closing }");
             if (e == i + 2) return fail("${} needs a variable name: ${HOME}");
-            add_val(w, Part::Env, -1, s.substr(i + 2, e - i - 2));
+            std::string name = s.substr(i + 2, e - i - 2);
+            // ${NAME:-x}, ${#NAME}, ${NAME%.c} ... are sh; they read as a variable with that odd
+            // name and failed only when the line ran (0.9.0): say it when the file is read.
+            bool plain = ident_start(name[0]);
+            for (char ch : name) plain = plain && ident_char(ch);
+            if (!plain) {
+                size_t op = 0;
+                while (op < name.size() && ident_char(name[op])) ++op;
+                std::string var = op ? name.substr(0, op) : "NAME";
+                return fail("${" + name + "} is sh: ${...} takes a variable name only; write #{ENV.fetch(\"" + var +
+                            "\", \"default\")} for a default, or #{...} with Ruby for the rest");
+            }
+            add_val(w, Part::Env, -1, name);
             i = e + 1;
         } else if (std::isdigit((unsigned char)c) || c == '@' || c == '#')
             return fail(std::string("$") + c + " is sh: write #{ARGV[0]}, #{ARGV.size} or $*");
@@ -1604,6 +1619,23 @@ void declared_names(const std::string& line, std::set<std::string>& out) {
     }
 }
 
+// The text of a file the reader reads ahead (require_relative, source): only a plain file, opened
+// without blocking, so a FIFO, /dev/stdin or a device is never read at read time (0.9.0 review).
+static bool read_ahead(const std::string& path, std::string& body) {
+    int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOCTTY);
+    if (fd < 0) return false;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        return false;
+    }
+    char buf[8192];
+    ssize_t r;
+    while ((r = read(fd, buf, sizeof buf)) > 0) body.append(buf, size_t(r));
+    close(fd);
+    return true;
+}
+
 void collect_defs(const std::string& src, const std::string& dir, std::set<std::string>& out, int depth) {
     size_t i = 0;
     while (i < src.size()) {
@@ -1621,6 +1653,31 @@ void collect_defs(const std::string& src, const std::string& dir, std::set<std::
             size_t b = k;
             while (k < ln.size() && (ident_char(ln[k]) || ln[k] == '?' || ln[k] == '!')) ++k;
             if (k > b) out.insert(ln.substr(b, k - b));
+        } else if (!dir.empty() && depth < 8 && ln.compare(0, 7, "source ") == 0) {
+            // D3 (0.9.0): `source <literal path>` is read ahead for its method names, as
+            // require_relative is. A path with #{}, $, a pattern or ~ is known only at run time.
+            size_t k = 7;
+            while (k < ln.size() && blank(ln[k])) ++k;
+            std::string rel;
+            if (k < ln.size() && (ln[k] == '"' || ln[k] == '\'')) {
+                size_t qe = ln.find(ln[k], k + 1);
+                if (qe == std::string::npos) continue;
+                rel = ln.substr(k + 1, qe - k - 1);
+                if (ln[k] == '"' && rel.find("#{") != std::string::npos) continue;
+            } else {
+                size_t b = k;
+                while (k < ln.size() && !blank(ln[k]) && ln[k] != ';' && ln[k] != '#') ++k;
+                rel = ln.substr(b, k - b);
+                if (rel.find_first_of("$*?[{~\\`") != std::string::npos) continue;
+            }
+            if (rel.empty()) continue;
+            // relative to this file's folder only, as `source` resolves a written-out path when it
+            // runs (the CTO's decision): the same file reads the same on every machine
+            std::string path = rel[0] == '/' ? rel : dir + "/" + rel;
+            std::string body;
+            if (!read_ahead(path, body)) continue;
+            size_t slash = path.rfind('/');
+            collect_defs(body, slash == std::string::npos ? "." : path.substr(0, slash), out, depth + 1);
         } else if (!dir.empty() && depth < 8 && ln.compare(0, 17, "require_relative ") == 0) {
             size_t q = ln.find_first_of("\"'", 17);
             if (q == std::string::npos) continue;
@@ -1629,13 +1686,8 @@ void collect_defs(const std::string& src, const std::string& dir, std::set<std::
             std::string rel = ln.substr(q + 1, qe - q - 1);
             for (const char* ext : {"", ".rsh", ".rb"}) {
                 std::string path = (rel[0] == '/' ? "" : dir + "/") + rel + ext;
-                FILE* f = std::fopen(path.c_str(), "rb");
-                if (!f) continue;
                 std::string body;
-                char buf[8192];
-                size_t r;
-                while ((r = std::fread(buf, 1, sizeof buf, f)) > 0) body.append(buf, r);
-                std::fclose(f);
+                if (!read_ahead(path, body)) continue;
                 size_t slash = path.rfind('/');
                 collect_defs(body, slash == std::string::npos ? "." : path.substr(0, slash), out, depth + 1);
                 break;

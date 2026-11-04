@@ -1,6 +1,116 @@
 # Changelog
 
+## 0.9.0
+
+The release candidate for 1.0 (`docs/STABILITY.md`, sections 10-12): rsh as a script interpreter, as
+`bash` runs `.sh` files. `docs/design.md` is now the specification (each rule names its test; the phase-1
+design moved to `docs/design-history.md`). Every fix below has a test that fails on 0.1.4 and passes
+here. How every test script and example is read did not change (`tests/frozen.explain`, the same digests
+from the 0.1.4 binary).
+
+### Fixes
+
+- **G1** A script read from standard input (`rsh < x`, `rsh -s`) names its place in messages:
+  `rsh: -:2: ls exited 2` (it was `rsh: ls exited 2`). `tests/run.sh` cli "G1" (2), `tests/contract.sh`
+  "stdin script".
+- **G2** `export NAME` for a name that is not set is a mistake that says what to write (status 1); it made
+  an empty variable, so `FOO=1; export FOO` (FOO=1 is Ruby in rsh) exported nothing. `golden/r9_script.rsh`.
+- **G3** `${NAME:-x}`, `${#NAME}` and the other sh forms of `${...}` are reader mistakes (status 2) that
+  say to write `#{ENV.fetch("NAME", "default")}`; they failed only when the line ran, with a garbled name.
+  cli "G3".
+- **G4** `$?` in a later part of a line is the status of the part that just ran: `cmd || echo "$?"` showed
+  the status from before the line. `golden/r9_spec.rsh` (S2.3).
+- **G5** `answer = gets`, then a command reading the same standard input from a file: the command gets the
+  rest (the interpreter's read-ahead is given back). A pipe cannot be given back (known limit K1). cli "G5".
+- **G7** `source FILE WORDS` gives the file `ARGV = WORDS` while it runs (the words were dropped).
+  `golden/r9_script.rsh`.
+- **G9** `File.stat`, `File.lstat`, `File.ftype`, `File::Stat`, `File.readable?`, `writable?`,
+  `executable?`, `owned?`, `Process.uid`, `euid`, `gid`, `egid`. `golden/r9_script.rsh`.
+- **G10** A syntax error on a line that starts with a Ruby word that is also a program (`printf`, `open`,
+  `format`, `test`, `exec`, `eval`, `send`, `method`, `trap`, `p`) says so and how to run the program
+  (`$ printf ...`), in a run and in `-n`. cli "G10".
+- **G11** A syntax error in a `source`d file names that file (it was `rsh: line 2: ...`). cli "G11".
+- **G12** `require "time"` worked but added nothing; now there are `Time#iso8601`/`xmlschema`, `Time.iso8601`
+  and `Time.parse` for ISO 8601 forms;
+  another form is ArgumentError. `golden/r9_script.rsh`.
+- **G13** The `require` message names every built-in library (json, set, time, etc). `golden/r9_script.rsh`.
+- **M1** Memory of a long session: each interactive or `-i` input left its code string and an arena slot
+  of the interpreter behind (about 250 bytes), and every command line typed was kept (about 600 bytes);
+  a `source`d file's text stayed in the arena too. Now freed; a command line is dropped once its input
+  ran unless code made by it (a method, a block, a proc) may run it later; history in memory is capped
+  at 6,000 entries (the file keeps all). 10,000 commands: +632 KB (0.1.4: +4,364 KB). cli "M1".
+
+### Tests and gates
+
+- `tests/golden/r9_spec.rsh`: the specification's rules that had no golden case of their own.
+- The examples of `docs/rsh.md` and of the manual page are tests (`tests/examples/doc_deploy.rsh`,
+  `doc_man.rsh`, `tests/golden/doc_plain.rb`, with a `journalctl` stand-in), and `tests/run.sh` fails
+  when a ```ruby block of `docs/rsh.md` is in no test, as it already did for `README.md`.
+- `tests/frozen.explain` and its check in `tests/contract.sh`: `--explain` of every test script and
+  example, file by file; the contract also checks that `VERSION`, `rsh -v`, `packaging.PKGBUILD` and
+  `CHANGELOG.md` agree.
+- `tests/soak.sh`: the sanitizer hour of the release gate (150 clean rounds for 0.9.0).
+- `tests/fuzz/reader.cpp` and `make fuzz` (needs clang): the reader, the one-line parser and the
+  interpreter's parser under libFuzzer with the address and undefined-behaviour sanitizers. The
+  Makefile adds the interpreter's IO header to the include path (G5 reads its buffer); no new library.
+
+### Packaging
+
+- `packaging.PKGBUILD`: `pkgver=0.9.0`; the tarball sha256 is `SKIP` until the tag exists; the
+  description says what rsh is for (a script interpreter).
+
+### Review fixes (FIX-FIRST, during 0.9.0)
+
+- `Sh.rm_rf` / `FileUtils.rm_rf` refuse `""`, `/`, `.`, `..`, a path ending in `/.` or `/..`, and any path
+  that resolves to `/` or the current folder (ArgumentError, nothing removed). `golden/r9_sh.rsh`.
+- `Sh.cp` / `FileUtils.cp` onto the same file (by name or a link) is ArgumentError instead of emptying
+  it; a copy is written to a new file next to the destination and renamed over it. `golden/r9_sh.rsh`.
+- `cmd &` with a pattern that matches nothing or a redirect that cannot open starts nothing and raises
+  `Rsh::Failed` (the script stops, as in 0.1.4; `Rsh.last_pid` unchanged). `golden/r9_decisions.rsh`.
+- The read-ahead of `source` and `require_relative` opens only plain files (never a FIFO or
+  `/dev/stdin`). cli "D3".
+- `cp_r` into itself or below itself is ArgumentError; `Sh.find`, `Find.find`, `Sh.du` and `cp_r` say
+  an unreadable folder on standard error and go on, as find(1) (cli "S6"); Errno errors carry the
+  system's text ("No such file or directory - x"); `Sh`, `FileUtils`, `Find`, `Shellwords` answer
+  `respond_to?` before they are loaded and `require "fileutils"` (and the others) loads them;
+  `Rsh::Failed#argv` of a D1 failure is the failing command's words (`["rm", "*.tmp"]`, `["cat", "-n"]`).
+- `wait N` matches a pid only for N > 0 (an ended process no longer matches `-PID`); a pid wins over a
+  job number, `%N` is always the job.
+- `Shellwords.split` as Ruby's: a backslash before a new line keeps both, a lone final backslash stays,
+  a backslash-new line inside double quotes is a new line.
+- `STD_SHA` also covers `Sh.find`'s and `Sh.tmpdir`'s parameters, `String#shellescape`/`#shellsplit`,
+  `Array#shelljoin`, `Dir.mktmpdir` and `Rsh.last_pid`; `tests/frozen.explain` covers `*.lib` files.
+
+### Decisions (the CTO, during 0.9.0) and the lead's request
+
+- **D1** A pattern with no match and a redirect that cannot open are a failed command with status 1, as a
+  missing program is 127: `false` in a condition (`ls *.log 2>/dev/null || echo none`; a no-match is
+  silent there, an open failure says why on standard error), `Rsh::Failed` outside one with the reason
+  as its message. They were `Rsh::Error` even in a condition. `nil`, NUL and an Array inside a word stay
+  `Rsh::Error`. `golden/r9_decisions.rsh`; `golden/glob.out` now shows `Rsh::Failed`.
+- **D2** `Rsh.last_pid`: the pid of the last `cmd &` (`nil` before the first); `wait PID` waits for that
+  process's job (`wait %N` for job N; a plain number is a pid first, then a job number: a pid wins).
+  `golden/r9_decisions.rsh`, contract "Rsh.last_pid".
+- **D3** A `source <literal path>` file is read ahead like `require_relative`, so its methods are Ruby at a
+  bare call. A written-out path is now relative to the script's own folder, when read and when the line
+  runs (it was the current folder at run time); a path made at run time (`#{}`, `$`, `~`, a pattern)
+  keeps the current folder. Only a plain file is read ahead. `golden/r9_decisions.rsh` (with
+  `r9_decisions.lib`, frozen in `tests/frozen.explain`), cli "D3" (a FIFO is never opened). Three older
+  tests that sourced a file made in the current folder at run time now name it with `#{}`
+  (`sec_c1_lines`, `sec_m8_load`, `r9_script`).
+- **S1** `Sh`, built in and loaded on first use (start-up about 2 ms, as before): `find` `grep` `which`
+  `exists?` `file?` `dir?` `age` `size` `du` `read` `write` `append` `lines` `mkdir_p` `touch` `cp` `cp_r`
+  `mv` `ln_s` `chmod` `rm` `rm_rf` `tmpdir`; and the Ruby-standard `FileUtils` (options refused, never
+  ignored), `Find.find`/`Find.prune`, `Shellwords` with `String#shellescape`/`#shellsplit` and
+  `Array#shelljoin`, `Dir.mktmpdir`; `require` of `fileutils`, `find`, `shellwords`, `tmpdir` works. No
+  program is started. `src/prelude_std.rb`, `Rsh.__touch` in `src/rt.cpp`; names frozen (contract
+  "STD_SHA", `docs/design.md` S8); `golden/r9_sh.rsh` (each helper), `examples/doc_sh.rsh` (the example
+  of `docs/rsh.md` and `rsh.1`, both checked line for line).
+
 ## 0.1.4
+
+(Committed as 970a477 but never tagged: its `VERSION` and `packaging.PKGBUILD` still said 0.1.3. 0.9.0
+is the next release; this section is the untagged step between.)
 
 QA-100 round 2 (audits `rsh.md` H-1..L-19 and `rsh-r2.md` R2-1..R2-20): the speed of Regexp loops, the
 end of a script (signals, `at_exit`), a handful of reader mistakes, the interactive shell's typed-ahead

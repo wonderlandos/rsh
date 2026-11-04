@@ -23,6 +23,14 @@ extern char** environ;
 
 namespace rsh {
 
+// D1 (0.9.0): a pattern with no match and a redirect that cannot open are a failed command (status
+// 1), not a mistake in the line; set where they are found, read by run_line.
+static bool soft_failure = false;
+static bool soft_quiet = false;  // no match: said only when it raises (a condition is a test)
+static std::vector<std::string> soft_argv;  // the failing command as far as it was read (Rsh::Failed#argv)
+static std::string soft_word;               // a pattern with no match, as written
+static const Line* current_line = nullptr;  // the line run_line runs (source resolves a written-out path)
+
 Shell& shell() {
     static Shell s;
     return s;
@@ -255,6 +263,8 @@ bool expand(const Word& w, const std::vector<Value>& vals, Host& h, std::vector<
             auto m = glob(a);
             if (m.empty() && !shell().nullglob) {
                 err = "no file matches " + glob_unescape(a);
+                soft_failure = soft_quiet = true;
+                soft_word = glob_unescape(a);
                 return false;
             }
             // A file named -rf must not become an option of the program (audit M2): ./-rf.
@@ -290,7 +300,13 @@ bool expand_cmd(const Cmd& c, const std::vector<Value>& vals, Host& h, Stage& st
     st.block = c.block;
     st.pipe_err = c.pipe_err;
     for (auto& w : c.words)
-        if (!expand(w, vals, h, st.argv, err)) return false;
+        if (!expand(w, vals, h, st.argv, err)) {
+            if (soft_failure) {  // the words before the pattern, then the pattern itself
+                soft_argv = st.argv;
+                soft_argv.push_back(soft_word);
+            }
+            return false;
+        }
     if (c.block < 0 && st.argv.empty()) {
         err = "the command word is empty";
         return false;
@@ -363,6 +379,8 @@ bool open_redirs(const Stage& st, std::vector<std::pair<int, int>>& map, std::ve
         }
         if (f < 0) {
             err = r.target + ": " + std::strerror(errno);
+            soft_failure = true;
+            soft_argv = st.argv;
             return false;
         }
         opened.push_back(f);
@@ -627,6 +645,25 @@ struct PipeResult {
     bool interrupted = false;
 };
 
+// `source lib.rsh` with the path written out: relative to the folder of the file the line is in, as
+// the reader read it ahead (the CTO's decision, 0.9.0); a path made at run time (#{}, $, a pattern,
+// ~) stays relative to the current folder. -c, a script on standard input and the interactive shell
+// have no file: their folder is the current one.
+static void source_path(const Item& it, std::string& path) {
+    if (!current_line || path.empty() || path[0] == '/' || it.pipeline.empty() || it.pipeline[0].words.size() < 2) return;
+    for (auto& p : it.pipeline[0].words[1].parts) {
+        if (p.k == Part::Lit) continue;
+        if (p.k == Part::Pat && p.s.find_first_of("*?[{~") == std::string::npos) continue;
+        return;
+    }
+    const std::string& f = current_line->file;
+    if (f.empty() || f[0] == '(' || f == "-" || f == "-c") return;
+    size_t slash = f.rfind('/');
+    std::string dir = slash == std::string::npos ? "" : slash == 0 ? "/" : f.substr(0, slash + 1);
+    if (dir.empty() || dir[0] != '/') dir = shell().start_dir + "/" + dir;  // the folder rsh started in
+    path = dir + path;
+}
+
 // Runs one pipeline in the foreground (or starts it in the background).
 bool pipeline(const Item& it, const std::vector<Value>& vals, Host& h, const Options& o, bool bg, const std::string& text,
               Outcome& oc, PipeResult& pr, std::vector<Stage>& stages) {
@@ -659,6 +696,7 @@ bool pipeline(const Item& it, const std::vector<Value>& vals, Host& h, const Opt
         Pipe cap;
         if (o.capture && cap.make()) save.set(1, cap.w);
         apply_map(map, &save);
+        if (stages[0].argv[0] == "source" && stages[0].argv.size() > 1) source_path(it, stages[0].argv[1]);
         int code = run_builtin(stages[0].argv, h, stages[0].env);
         if (stages[0].argv.size() == 1 && stages[0].argv[0] == "exec" && !o.capture) {
             for (auto& sv : save.saved)  // exec with only redirects: they stay
@@ -878,6 +916,11 @@ bool pipeline(const Item& it, const std::vector<Value>& vals, Host& h, const Opt
 // `Rsh.eval` may add lines to table() while this line runs, which moves its entries (audit C1).
 static Outcome run_line(const Line& L, const std::vector<Value>& vals, Host& h, const Options& o) {
     Outcome oc;
+    struct Current {
+        const Line* was;
+        explicit Current(const Line* l) : was(current_line) { current_line = l; }
+        ~Current() { current_line = was; }
+    } current(&L);
     // Background jobs of a script are reaped before each line, so they leave no zombies (audit M5);
     // the interactive loop does it itself and reports them.
     if (!shell().interactive && !jobs.empty()) report_jobs();
@@ -893,10 +936,43 @@ static Outcome run_line(const Line& L, const std::vector<Value>& vals, Host& h, 
         if (!go) continue;
         std::vector<Stage> stages;
         PipeResult pr;
-        if (!pipeline(it, vals, h, o, it.op == Op::Bg, L.text, oc, pr, stages)) {
+        soft_failure = soft_quiet = false;
+        soft_argv.clear();
+        bool ran = pipeline(it, vals, h, o, it.op == Op::Bg, L.text, oc, pr, stages);
+        if (!ran && !soft_failure) {
             oc.code = 1;
             shell().last_status = 1;
             return oc;
+        }
+        if (soft_failure && !oc.error.empty()) {  // (a stage that could not open its redirect may come after stages that ran)
+            // D1: as a program that failed with status 1. Raised (outside a condition) its message
+            // is the reason; else the reason is said on standard error, except for a pattern with
+            // no match, which a condition asks about on purpose (`ls *.log || echo none`).
+            std::string why = std::move(oc.error);
+            oc.error.clear();
+            // `cmd &` with a no-match or a file that cannot open: nothing of it starts in the
+            // background, and the script stops there as 0.1.4 did (it is never a condition).
+            if (it.op == Op::Bg && !shell().interactive) {
+                oc.code = 1;
+                oc.statuses = {1};
+                shell().last_status = 1;
+                oc.raise = true;
+                oc.failed_argv = soft_argv;
+                oc.failed_msg = why;
+                return oc;
+            }
+            bool will_raise = k + 1 == L.items.size() && it.op != Op::Bg && !it.bang && !o.cond && !o.relaxed &&
+                              !shell().interactive;
+            if (!will_raise && !soft_quiet) say(2, "rsh: " + why + "\n");
+            Stage st;
+            st.argv = soft_argv;
+            st.status = 1;
+            stages.clear();
+            stages.push_back(std::move(st));
+            pr.code = 1;
+            if (pr.statuses.empty()) pr.statuses = {1};
+            pr.failed = 0;
+            oc.failed_msg = why;
         }
         if (oc.ruby_error) {
             oc.code = 1;
@@ -905,6 +981,9 @@ static Outcome run_line(const Line& L, const std::vector<Value>& vals, Host& h, 
         }
         last = pr.code;
         if (it.bang) last = last ? 0 : 1;
+        // $? in the next part of the line is this part's status (0.9.0: `cmd || echo "$?"` showed
+        // the status from before the line)
+        shell().last_status = last;
         last_item = int(k);
         oc.statuses = pr.statuses;
         oc.sig = pr.sig;
@@ -1023,8 +1102,15 @@ Job* find_job(const std::vector<std::string>& a) {
     if (jobs.empty()) return nullptr;
     if (a.size() < 2) return &jobs.back();
     std::string w = a[1];
-    if (!w.empty() && w[0] == '%') w = w.substr(1);
+    bool job = !w.empty() && w[0] == '%';
+    if (job) w = w.substr(1);
     int id = std::atoi(w.c_str());
+    // `wait PID` (as sh, 0.9.0: the pid of `cmd &` from $! or Rsh.last_pid); %N and a number that is
+    // no job's process are the job number, as before
+    if (!job)
+        for (auto& j : jobs)
+            for (pid_t p : j.pids)
+                if (id > 0 && (p == id || p == -id)) return &j;  // an ended process is kept as -pid
     for (auto& j : jobs)
         if (j.id == id) return &j;
     return nullptr;
@@ -1153,7 +1239,13 @@ int run_builtin(const std::vector<std::string>& a, Host& h, const Env& env) {
                 return 2;
             }
             if (eq != std::string::npos) setenv(name.c_str(), a[k].c_str() + eq + 1, 1);
-            else if (!getenv(name.c_str())) setenv(name.c_str(), "", 1);
+            else if (!getenv(name.c_str())) {
+                // sh habit: FOO=1 then export FOO. In rsh FOO=1 is Ruby, not the environment, so
+                // an empty FOO here would be a silent mistake (0.9.0).
+                complain("export: " + name + " is not set: write export " + name + "=value (export " + name +
+                         "=#{" + name + "} for a Ruby value)");
+                return 1;
+            }
         }
         return 0;
     }
