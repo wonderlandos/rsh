@@ -10,9 +10,10 @@ permissions:
   contents: write
 jobs:
   hub:
-    # Pin to a commit of wonderlandos/hub once tools/wolpack and this workflow are on its main.
-    uses: wonderlandos/hub/.github/workflows/wol-release.yml@main
+    # Pinned to wonderlandos/hub 4e6f01f (wol-release.yml and tools/wolpack); move both pins together.
+    uses: wonderlandos/hub/.github/workflows/wol-release.yml@4e6f01f6599950f3a0b13ce93da8f0f4e4ead7b4
     with:
+      tools_ref: 4e6f01f6599950f3a0b13ce93da8f0f4e4ead7b4
       kind: app
       id: wonderlandos.rsh
       makedepends: ruby ruby-rake bison pcre2
