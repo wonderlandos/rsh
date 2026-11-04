@@ -1,0 +1,22 @@
+mode: ruby (the shell layer is off; `# rsh: shell` as the first line turns it on)
+   1 R  #!/usr/bin/rsh
+   2 R  # SPDX-License-Identifier: GPL-2.0-or-later
+   3 R  # A .rb file is plain Ruby: no line is a command line, whatever its first word.
+   4 R  # rsh: shell   (not on the first line, so it changes nothing)
+   5 R  def twice(x)
+   6 R    x * 2
+   7 R  end
+   8 R  puts twice(21)
+   9 R  puts ARGV.inspect
+  10 R  puts "echo is only text here"
+  11 R  begin
+  12 R    nosuchcommand "arg"
+  13 R  rescue NoMethodError
+  14 R    puts "NoMethodError"
+  15 R  end
+  16 R  words = %w[a b c]
+  17 R  puts words.map { |w| w.upcase }.join("-")
+  18 R  puts <<~TEXT
+  19 R    ls -l | wc -l
+  20 R  TEXT
+  21    

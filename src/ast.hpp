@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// rsh: the parsed form of one command line (docs/modules/rsh.md). The transpiler builds it once;
+// rsh: the parsed form of one command line (docs/rsh.md). The transpiler builds it once;
 // the runner gets it by index with the Ruby values of that run.
 #pragma once
 #include <string>

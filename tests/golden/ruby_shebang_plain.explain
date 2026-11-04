@@ -1,0 +1,5 @@
+mode: ruby (the shell layer is off; `# rsh: shell` as the first line turns it on)
+   1 R  #!/usr/bin/rsh
+   2 R  puts "plain after the shebang line"
+   3 R  puts [1, 2, 3].sum
+   4    

@@ -40,6 +40,22 @@ it reads the script from standard input (this is how
 .B "wol script on"
 sends a script to another computer). With nothing, on a terminal, it is
 interactive.
+.SS Ruby files
+A file whose name ends in
+.B .rb
+is plain Ruby: the shell layer is off, no line is a command line, and the file means what it
+means in Ruby. A
+.B .rb
+file can ask for the shell layer with the comment
+.B "# rsh: shell"
+as its first line (or as the line after a
+.B #!
+line). Every other file, and text given with
+.BR \-c ,
+.B \-e
+or
+.BR \-s ,
+has the shell layer.
 .SS How a line is read
 Only the start of a statement is looked at: the start of the file, after a new line or
 .BR ; ,
@@ -249,6 +265,13 @@ Run the text.
 Read the script from standard input. Arguments come after
 .BR \-\- .
 .TP
+.BI \-\-name " file"
+With
+.BR \-s :
+the file name the script has, for messages and for the
+.B .rb
+rule above.
+.TP
 .B \-n
 Read and compile the script and run nothing.
 .TP
@@ -261,7 +284,7 @@ and world-writable
 .BR chmod .
 .TP
 .B \-\-explain
-Show how each line is read.
+Show the mode (shell or ruby), then how each line is read.
 .TP
 .B \-\-ruby
 Show the Ruby text that will run.

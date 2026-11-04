@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // rsh: Ruby with command lines. `rsh file [args]` runs a script (also through `#!/usr/bin/rsh`),
-// `rsh` alone on a terminal is interactive. See rsh(1) and docs/modules/rsh.md.
+// `rsh` alone on a terminal is interactive. A `.rb` file runs as plain Ruby (no shell layer)
+// unless its first line is `# rsh: shell`. See rsh(1) and docs/rsh.md.
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -23,9 +24,10 @@ const char* USAGE =
     "usage: rsh [options] [file [arguments]]\n"
     "  -c TEXT     run TEXT (-e is the same)\n"
     "  -s          read the script from standard input (arguments follow, after --)\n"
+    "  --name FILE with -s: the file name to use in messages and for the .rb rule (plain Ruby)\n"
     "  -n          check the script: read and compile it, run nothing\n"
     "  --lint      -n, plus warnings (unknown commands, risky forms)\n"
-    "  --explain   show how each line is read: C command line, R Ruby, X a capture inside Ruby\n"
+    "  --explain   show the mode and how each line is read: C command line, R Ruby, X a capture inside Ruby\n"
     "  --ruby      show the Ruby text rsh runs\n"
     "  -i          interactive (-l, a login window, is the same)\n"
     "  -v          version\n";
@@ -311,7 +313,7 @@ int interactive() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string code, file;
+    std::string code, file, name;
     bool have_code = false, from_stdin = false, check = false, lint = false, explain = false, show_ruby = false, inter = false;
     int i = 1;
     for (; i < argc; ++i) {
@@ -323,6 +325,7 @@ int main(int argc, char** argv) {
         if (a.empty() || a[0] != '-' || a == "-") break;
         if ((a == "-c" || a == "-e") && i + 1 < argc) code = argv[++i], have_code = true;
         else if (a == "-s") from_stdin = true;
+        else if (a == "--name" && i + 1 < argc) name = argv[++i];
         else if (a == "-n") check = true;
         else if (a == "--lint") check = lint = true;
         else if (a == "--explain") explain = true;
@@ -345,7 +348,7 @@ int main(int argc, char** argv) {
         file = "-c";
         src = code;
     } else if (from_stdin) {
-        file = "-";
+        file = name.empty() ? "-" : name;
         bool ok;
         src = read_file("-", ok);
     } else if (i < argc) {
@@ -365,14 +368,21 @@ int main(int argc, char** argv) {
     }
     for (; i < argc; ++i) args.push_back(argv[i]);
 
+    // A .rb file is plain Ruby (the shell layer off) unless it opts in with `# rsh: shell`.
+    const bool shell = wants_shell_layer(file, src);
+
     if (explain || show_ruby) {
         Known k;
-        size_t slash = file.rfind('/');
-        collect_defs(src, slash == std::string::npos ? "." : file.substr(0, slash), k.methods);
-        Result r = transpile(src, file, k);
+        Result r;
+        if (shell) {
+            size_t slash = file.rfind('/');
+            collect_defs(src, slash == std::string::npos ? "." : file.substr(0, slash), k.methods);
+            r = transpile(src, file, k);
+        } else r.ruby = src;
         for (auto& d : r.diags) std::fprintf(stderr, "%s:%d: %s\n", file.c_str(), d.line, d.msg.c_str());
         if (show_ruby) std::fputs(r.ruby.c_str(), stdout);
         else {
+            std::printf("mode: %s\n", shell ? "shell" : "ruby (the shell layer is off; `# rsh: shell` as the first line turns it on)");
             std::vector<char> kind;
             size_t n = 1;
             for (char c : src) n += c == '\n';
@@ -395,7 +405,7 @@ int main(int argc, char** argv) {
     }
     mrb_state* mrb = rt_open(file, args);
     if (!mrb) return 70;
-    int rc = check ? rt_check(mrb, src, file, lint) : rt_run(mrb, src, file, true);
+    int rc = check ? rt_check(mrb, src, file, lint, shell) : rt_run(mrb, src, file, shell);
     std::fflush(stdout);
     rt_close(mrb);
     return rc;

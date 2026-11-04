@@ -1,0 +1,5 @@
+mode: shell
+   1 R  #!/usr/bin/rsh
+   2 R  # rsh: shell
+   3 C  echo opt-in after the shebang line
+   4    

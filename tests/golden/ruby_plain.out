@@ -1,0 +1,7 @@
+42
+[]
+echo is only text here
+NoMethodError
+A-B-C
+ls -l | wc -l
+status: 0

@@ -1,0 +1,8 @@
+mode: shell
+   1 R  # rsh: shell
+   2 R  # A .rb file with the opt-in on its first line gets the shell layer.
+   3 C  echo hello from the shell layer
+   4 R  name = "x y"
+   5 C  echo #{name} && echo second
+   6 C  nosuchcommand_zz || echo failed-as-command
+   7    

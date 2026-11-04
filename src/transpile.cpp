@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // rsh: the reader. A small Ruby lexer finds statement starts; at each one the first word decides
-// between Ruby and a command line (docs/modules/rsh.md, "How rsh reads a line"). The rule looks
+// between Ruby and a command line (docs/rsh.md, "How rsh reads a line"). The rule looks
 // only at the text, never at PATH, so a file means the same thing on every computer.
 #include "transpile.hpp"
 

@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential bison ruby pkg-config libpcre2-dev
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: Test
+        run: make test
+      - name: Size (limit 3 MB)
+        run: |
+          size=$(stat -c %s build/rsh)
+          echo "build/rsh is $size bytes"
+          test "$size" -le 3145728
+      - name: Install into a staging directory
+        run: |
+          make install DESTDIR="$PWD/stage" PREFIX=/usr
+          test -x stage/usr/bin/rsh
+          test -f stage/usr/share/man/man1/rsh.1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rsh-linux-x86_64
+          path: build/rsh
+          if-no-files-found: error

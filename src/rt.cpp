@@ -365,7 +365,7 @@ mrb_value m_require(mrb_state* mrb, mrb_value) {
     bool syn;
     std::string p = cxx(path);
     std::string s = cxx(src);
-    bool rsh_syntax = !ends_with(p, ".rb");
+    bool rsh_syntax = wants_shell_layer(p, s);
     load_text(mrb, s, p, rsh_syntax, syn);
     std::string().swap(p);
     std::string().swap(s);
@@ -390,7 +390,7 @@ int RtHost::source(const std::vector<std::string>& a) {
         return 1;
     }
     bool syn;
-    load_text(mrb, body, a[1], !ends_with(a[1], ".rb"), syn);
+    load_text(mrb, body, a[1], wants_shell_layer(a[1], body), syn);
     if (syn) return 2;
     if (mrb->exc) {  // reported here; the command line itself only fails
         mrb_print_error(mrb);
@@ -822,6 +822,32 @@ mrb_ccontext* repl_cxt = nullptr;
 
 }  // namespace
 
+// Does this file get the shell layer? Everything does except a `.rb` file, which is plain Ruby
+// (its text goes to the interpreter unchanged) unless its first line, or the line after a
+// `#!` line, is the comment `# rsh: shell`.
+bool wants_shell_layer(const std::string& file, const std::string& src) {
+    if (!ends_with(file, ".rb")) return true;
+    size_t b = 0;
+    for (int n = 0; n < 2 && b < src.size(); ++n) {
+        size_t e = src.find('\n', b);
+        if (e == std::string::npos) e = src.size();
+        std::string line = src.substr(b, e - b);
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.pop_back();
+        if (n == 0 && line.compare(0, 2, "#!") == 0) {
+            b = e + 1;
+            continue;
+        }
+        if (line.compare(0, 1, "#") != 0) return false;
+        size_t k = 1;
+        while (k < line.size() && (line[k] == ' ' || line[k] == '\t')) ++k;
+        if (line.compare(k, 4, "rsh:") != 0) return false;
+        k += 4;
+        while (k < line.size() && (line[k] == ' ' || line[k] == '\t')) ++k;
+        return line.compare(k, std::string::npos, "shell") == 0;
+    }
+    return false;
+}
+
 mrb_state* rt_open(const std::string& script, const std::vector<std::string>& args) {
     mrb_state* mrb = mrb_open();
     if (!mrb) return nullptr;
@@ -959,12 +985,15 @@ int rt_eval(mrb_state* mrb, const std::string& src, Known& known, bool& exited, 
     return status;
 }
 
-int rt_check(mrb_state* mrb, const std::string& src, const std::string& file, bool lint) {
+int rt_check(mrb_state* mrb, const std::string& src, const std::string& file, bool lint, bool rsh_syntax) {
     int bad = 0;
     size_t before = table().size();
     Known k;
-    collect_defs(src, dir_of(file), k.methods);
-    Result r = transpile(src, file, k);
+    Result r;
+    if (rsh_syntax) {
+        collect_defs(src, dir_of(file), k.methods);
+        r = transpile(src, file, k);
+    } else r.ruby = src;
     for (auto& d : r.diags) {
         std::fprintf(stderr, "%s:%d: %s%s\n", file.c_str(), d.line, d.warning ? "warning: " : "", d.msg.c_str());
         if (!d.warning) bad = 2;

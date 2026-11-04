@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-# rsh: Ruby with command lines (docs/modules/rsh.md). The interpreter is fetched at one pinned
+# rsh: Ruby with command lines (docs/rsh.md). The interpreter is fetched at one pinned
 # commit and checked by sha256 (never kept in the tree); MRUBY_TARBALL= hands in a local copy
 # (the package build is offline). Needs: a C/C++ compiler, ruby and bison (the interpreter's build
 # script), libpcre2-8 (Regexp).
@@ -71,14 +71,19 @@ build/unit: tests/unit.cpp $(LIBOBJ) build/obj/prelude.o $(MLIB)
 test: build/unit build/rsh
 	./build/unit
 	RSH=$(CURDIR)/build/rsh sh tests/run.sh
+	sh tests/doctrine.sh build/rsh
 	@if command -v ruby >/dev/null; then ruby tests/interactive.rb build/rsh; else echo 'interactive: ruby missing, skipped'; fi
 
 bench: build/rsh
 	sh tests/bench.sh build/rsh
 
+# make install [PREFIX=/usr] [DESTDIR=staging]
 install: build/rsh
 	install -Dm755 build/rsh $(DESTDIR)$(PREFIX)/bin/rsh
 	install -Dm644 rsh.1 $(DESTDIR)$(PREFIX)/share/man/man1/rsh.1
+
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/bin/rsh $(DESTDIR)$(PREFIX)/share/man/man1/rsh.1
 
 clean:
 	rm -rf build/obj build/rsh build/unit
@@ -86,4 +91,4 @@ clean:
 distclean:
 	rm -rf build
 
-.PHONY: all test bench install clean distclean
+.PHONY: all test bench install uninstall clean distclean

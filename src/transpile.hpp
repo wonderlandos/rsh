@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // rsh: script text -> Ruby text. Each statement whose first word is not something Ruby knows is a
-// command line (docs/modules/rsh.md, "How rsh reads a line"); it becomes one call of the runner
+// command line (docs/rsh.md, "How rsh reads a line"); it becomes one call of the runner
 // with its Ruby values, on the same line, so messages point at the right place.
 #pragma once
 #include <set>

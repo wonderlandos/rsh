@@ -9,6 +9,7 @@
 
 #include "exec.hpp"
 #include "glob.hpp"
+#include "rt.hpp"
 #include "transpile.hpp"
 
 using namespace rsh;
@@ -69,7 +70,31 @@ static std::vector<std::string> argv_of(const std::string& text, std::vector<Val
     return out;
 }
 
+static void test_modes() {
+    // everything but a .rb file has the shell layer
+    CHECK(wants_shell_layer("x.rsh", "puts 1\n"));
+    CHECK(wants_shell_layer("-c", "echo hi"));
+    CHECK(wants_shell_layer("script", "echo hi"));
+    // a .rb file is plain Ruby ...
+    CHECK(!wants_shell_layer("x.rb", ""));
+    CHECK(!wants_shell_layer("x.rb", "puts 1\n"));
+    CHECK(!wants_shell_layer("dir/x.rb", "#!/usr/bin/rsh\nputs 1\n"));
+    // ... unless the first line (or the one after a #! line) is the opt-in comment
+    CHECK(wants_shell_layer("x.rb", "# rsh: shell\necho hi\n"));
+    CHECK(wants_shell_layer("x.rb", "#rsh:shell\n"));
+    CHECK(wants_shell_layer("x.rb", "# rsh: shell"));
+    CHECK(wants_shell_layer("x.rb", "# rsh:   shell  \r\necho hi\n"));
+    CHECK(wants_shell_layer("x.rb", "#!/usr/bin/rsh\n# rsh: shell\necho hi\n"));
+    CHECK(!wants_shell_layer("x.rb", "\n# rsh: shell\n"));
+    CHECK(!wants_shell_layer("x.rb", "puts 1\n# rsh: shell\n"));
+    CHECK(!wants_shell_layer("x.rb", "#!/usr/bin/rsh\nputs 1\n# rsh: shell\n"));
+    CHECK(!wants_shell_layer("x.rb", "# rsh: shell now\n"));
+    CHECK(!wants_shell_layer("x.rb", "# rsh: ruby\n"));
+    CHECK(!wants_shell_layer("x.rb", "# frozen_string_literal: true\n# rsh: shell\n"));
+}
+
 int main() {
+    test_modes();
     // -- the rule: what is a command line
     CHECK(is_cmd("git pull --ff-only"));
     CHECK(is_cmd("ls -l"));
