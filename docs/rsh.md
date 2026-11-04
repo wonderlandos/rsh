@@ -30,26 +30,46 @@ At a statement start the line is a command line when all of these hold:
 1. the first word is a plain word, or starts with `./`, `../`, `/` or `~` (a path is always a command);
 2. it is not a Ruby keyword;
 3. it is not a local variable set earlier (Ruby's own rule: a local wins);
-4. it is not a method defined in the file (or in a `require_relative "<literal>"` file), and not one of Ruby's own words: `puts print p pp printf sprintf format require require_relative load raise fail loop exit exit! abort at_exit catch throw lambda proc rand srand gets warn binding block_given? caller Integer Float String Array Hash attr_reader attr_writer attr_accessor private public protected module_function include extend define_method system trap`; a Capitalised word is Ruby. `sleep` is a command (`sleep 5 &` works; `sleep(0.5)` is Ruby);
+4. it is not a method the file makes in a way the reader can see (below), and not one of Ruby's own words: `puts print p pp printf sprintf format require require_relative load raise fail loop exit exit! abort at_exit catch throw lambda proc rand srand gets warn binding block_given? caller Integer Float String Array Hash attr_reader attr_writer attr_accessor private public protected module_function include extend define_method system trap freeze __method__`, the metaprogramming words `send public_send __send__ eval instance_eval instance_exec class_eval class_exec module_eval module_exec define_singleton_method instance_variable_get instance_variable_set remove_method undef_method alias_method prepend using refine private_constant public_constant private_class_method public_class_method remove_const const_get const_set singleton_class method rsh_methods`, and the conversions `to_a to_s to_h to_i to_f to_sym to_proc inspect dup clone instance_variables`; a Capitalised word is Ruby. `sleep` is a command (`sleep 5 &` works; `sleep(0.5)` is Ruby);
 5. the next character is not one of `. ( [ :: , = += -= ||= &&= ? !` glued to the word, and it is not ` = `.
 
-Escape hatches: a leading `$ ` forces a command line (`$ printf '%s\n' x` runs the program, not Ruby's `printf`); `foo(...)` or `self.foo` forces Ruby. `NAME=val cmd ...` sets a variable for that one command; `x=1` alone is Ruby.
+The methods the reader can see (rule 4), anywhere in the file or in a `require_relative "<literal>"` file, before or after the line that uses them:
 
-`rsh --explain file` prints the mode, then each line as `R` (Ruby), `C` (command line) or `X` (a back-quote capture inside Ruby). `rsh -n` compiles without running; `rsh --lint` adds warnings: a command word that is not on `PATH` and could be a Ruby method ("write foo(...)"), `sh -c` text with a `#{}` in it, a world-writable `chmod`, fixed `/tmp` names. The rule is static, so the same file means the same on every machine. `tests/golden/classify.rsh` and its `.explain` file are the examples of every case.
+- `def name` (also `def self.name`, `private def name`);
+- a literal name after `define_method`, `define_singleton_method`, `alias_method`, `alias`, `attr_reader`, `attr_accessor`, `attr_writer`, `Struct.new(...)`, `Data.define(...)`: `:name`, `"name"`, `'name'`, `%i[a b]` or `%w[a b]`;
+- `rsh_methods :name, ...` (the same literal forms): the declaration for methods that only exist at run time, made by `method_missing` or by `define_method` over a list. At run time `rsh_methods` does nothing but add the names for `Rsh.eval`.
+
+A name in a variable (`define_method(verb)`, `define_method("#{verb}!")`) is known only at run time, so the reader cannot count it; declare it with `rsh_methods` or call it as `name(...)` or `self.name`.
+
+Escape hatches: a leading `$ ` forces a command line (`$ printf '%s\n' x` runs the program, not Ruby's `printf`); `foo(...)` or `self.foo` forces Ruby. `NAME=val cmd ...` sets a variable for that one command; `x=1` alone is Ruby. `ruby do ... end` or `ruby { ... }` at a statement start makes every statement inside Ruby (no bare word is a command); `ruby!` alone on its line does the same from there to the end of the file. In both, `$ cmd` and back-quote captures still run programs. Inside `#{...}` in a command line the code is a Ruby expression, as in a Ruby string (`echo #{name}` calls `name`).
+
+`rsh --explain file` prints the mode, the names it reads as methods (`methods: ...`), the Ruby-only lines (`ruby only: lines 9-14 (a ruby block)`, `ruby only: line 30 to the end (ruby!)`), then each line as `R` (Ruby), `C` (command line) or `X` (a back-quote capture inside Ruby). `rsh -n` compiles without running; `rsh --lint` adds warnings: a command word that is not on `PATH` and could be a Ruby method ("write foo(...) or declare it with rsh_methods :foo"), `sh -c` text with a `#{}` in it, a world-writable `chmod`, fixed `/tmp` names. The rule is static, so the same file means the same on every machine. `tests/golden/classify.rsh` and its `.explain` file are the examples of every case.
 
 ## Ruby files
 
-`rsh file.rb` runs a plain Ruby file: the shell layer is off, so no line is a command line, whatever its first word, and the file means what it means in Ruby (a line `ls -l` is a Ruby call, not a command). Existing Ruby scripts are not changed by rsh. The Ruby is the one built into rsh (see "What is inside" for what it leaves out).
-
-A `.rb` file asks for the shell layer with the comment `# rsh: shell` as its first line, or as the line after a `#!` line:
+Every file has the shell layer, whatever its name: `rsh file.rb` reads a `.rb` file exactly as a `.rsh` file, so Ruby and command lines mix the same way in both. A file that must stay plain Ruby turns the layer off with the comment `# rsh: ruby` as its first line, or as the line after a `#!` line; then no line is a command line, whatever its first word, and the file means what it means in Ruby (a line `ls -l` is a Ruby call). `# rsh: shell` in the same place says the default out loud. `ruby file.rb` (the system's Ruby, when installed) runs Ruby without rsh.
 
 ```ruby
 #!/usr/bin/rsh
-# rsh: shell
-git pull --ff-only && make
+# rsh: ruby
+puts ARGV.map(&:upcase).join(" ")      # plain Ruby
 ```
 
-Every other file (`.rsh`, no ending, anything else) has the shell layer, and so do `-c`, `-e` and a script on standard input. `-s --name x.rb` gives a script on standard input the name `x.rb` for messages and for this rule. `rsh --explain file` starts with `mode: shell` or `mode: ruby`; `-n` and `--lint` on a plain `.rb` file only check that it is Ruby; `--ruby` shows the text unchanged. A file loaded with `require_relative`, `load` or `source` follows the same rule by its own name and first line.
+The same holds for `-c`, `-e` and a script on standard input; `-s --name x.rb` gives such a script its name for messages and `$0`. `rsh --explain file` starts with `mode: shell` or `mode: ruby`; `-n` and `--lint` on a `# rsh: ruby` file only check that it is Ruby; `--ruby` shows its text unchanged. A file loaded with `require_relative`, `load` or `source` follows the same rule by its own first line. The Ruby is the one built into rsh (see "What is inside" for what it leaves out).
+
+## Metaprogramming
+
+Ruby's metaprogramming works with the shell layer on and off: `define_method`, `method_missing` and `respond_to_missing?`, `send`, `public_send`, `instance_eval`, `instance_exec`, `class_eval` (a block or a string, with `__FILE__, __LINE__`), `eval`, `binding`, `define_singleton_method`, `prepend`, `include` and `extend` with `included`, `extended`, `prepended`, `inherited`, `method_added`, `const_missing`, `ObjectSpace.each_object`, procs, lambdas, `curry`, `Method` objects, `Struct`, `Data` and `Comparable`.
+
+What to know with the shell layer on:
+
+- **Methods made at run time.** The reader decides what a line is before the script runs (the rule above). A method made by `method_missing`, or by `define_method` with a name in a variable, is not visible then, so a bare call to it at a statement start is a command line. Write it as `name(...)` or `self.name`, declare it with `rsh_methods :name`, or put the code in `ruby do ... end`.
+- **A class that runs programs.** In `method_missing`, `$ #{name} #{args}` runs the program called `name` with every element of `args` as one argument: no shell reads it, nothing is split or expanded. `($ #{name} #{args})` in parentheses gives `true` or `false` and does not raise.
+- **Blocks with command lines.** A block given to `instance_eval`, `class_eval`, `define_method`, `Class.new` or any method is read like the rest of the file: command lines in it run when the block runs, with that block's `self`.
+- **Two evals.** `eval(text)`, `instance_eval(text)` and `class_eval(text)` are plain Ruby: a line `echo x` in the text is a Ruby call. `Rsh.eval(text)` reads the text with the shell layer and runs it at the top level (`self` is the main object, the caller's local variables are not seen); `Rsh.eval(text, binding)` runs it in that binding (its `self` and local variables, which are never commands). A failing command in it raises `Rsh::Failed` as anywhere. `Rsh.translate(text)` gives the Ruby that `Rsh.eval` would run.
+- **Code built as text.** `class_eval <<~RUBY, __FILE__, __LINE__ + 1` with `#{}` filling in names works as in Ruby. A text given to `instance_eval` or `class_eval` does not see the caller's local variables (pass values in with `#{}` or use the block form, which does): in the built-in interpreter the receiver of such a call would otherwise stay the place where later `def` and `class` lines of the caller go.
+
+`tests/golden/meta_*.rsh` and `meta_*.rb` show each case with its output. `examples/meta/deploy_dsl.rsh` is a deploy language made with `method_missing` (`git.checkout "v1"` becomes a step, run locally with `$ #{argv}` or over `ssh` with each word quoted), `examples/meta/tasks.rsh` a task runner whose tasks are methods made with `define_method`.
 
 ## Inside a command line
 
@@ -78,7 +98,7 @@ Commands built in: `cd` (also `cd dir do ... end`, which returns afterwards), `p
 
 ## What is inside
 
-The interpreter is built into the program (named in `Makefile` and `build_config.rb`, credited with its licence in the package). It is fetched at one pinned commit and checked by sha256 and never kept in the tree. Left out on purpose: `eval` and `binding`, sockets (network goes through commands: `curl`, `wol`), big and rational numbers. Written for rsh: process spawning with redirects, process groups and job control, `ENV` kept in step with the process environment, `Dir.glob`, `File.write`, `File.readlines`, JSON (`JSON.parse`, `to_json`, `JSON.pretty_generate`), and `Regexp` over the system's regular-expression library (named groups, look-ahead, lazy quantifiers; `=~ match match? MatchData $~ $1` and `sub gsub scan split`). `require` knows only `json set time etc` (built in); your own files load with `require_relative`.
+The interpreter is built into the program (named in `Makefile` and `build_config.rb`, credited with its licence in the package). It is fetched at one pinned commit and checked by sha256 and never kept in the tree. In for metaprogramming: `eval`, `binding`, `instance_eval`/`class_eval` with a string, `ObjectSpace`. Left out on purpose: sockets (network goes through commands: `curl`, `wol`), big and rational numbers. Not in the interpreter: refinements (`refine`, `using`), `defined?`, `$!` (it stays `nil`; use `rescue => e`), the block parameter `it` (`_1` works), `TracePoint`, `ObjectSpace::WeakMap`, `const_source_location`; `ObjectSpace.each_object` needs a block. Added by rsh: `warn`, `abort`, `private_method_defined?`, `public_method_defined?`, `protected_method_defined?`, `Data#with`. Written for rsh: process spawning with redirects, process groups and job control, `ENV` kept in step with the process environment, `Dir.glob`, `File.write`, `File.readlines`, JSON (`JSON.parse`, `to_json`, `JSON.pretty_generate`), and `Regexp` over the system's regular-expression library (named groups, look-ahead, lazy quantifiers; `=~ match match? MatchData $~ $1` and `sub gsub scan split`). `require` knows only `json set time etc` (built in); your own files load with `require_relative`.
 
 Interactive (`rsh` on a terminal, `-i`, or `-l`, which the terminal passes): a line editor (UTF-8 widths, Emacs keys, history in `~/.local/state/rsh/history`, mode 0600, Ctrl-R search), Tab completion (builtins, programs on `PATH`, files, your variables and methods), more input while the Ruby is not finished, job control (own process group per job, Ctrl-Z, `fg`, `bg`, `[1]+ Done`), and colours while you type from the same reader that runs the line: the command word is green when found and red when not, keywords, strings and numbers have their own colours. `~/.config/rsh/init.rsh` runs first; `def prompt` in it gives the prompt.
 
@@ -86,12 +106,13 @@ Interactive (`rsh` on a terminal, `-i`, or `-l`, which the terminal passes): a l
 
 `make` builds `build/rsh` (needs a C and C++ compiler, `ruby` and `bison` for the interpreter's own build script, and `libpcre2-8`; `LINK=static` is the default and needs `libpcre2-8.a`, `LINK=dynamic` is for distributions without it). `make test` runs the unit checks and the golden scripts, `make bench` the size and start-up. A Makefile variable hands in a local copy of the interpreter source (the package build is offline).
 
-Measured on the AWS build box (2026-11-04, x86_64, static, stripped, `-Os`): 2,895,976 bytes; start-up of `rsh -e 'puts 1'` median 2.45 ms (20 runs, min 2.0, max 3.0); `rsh -c nil` median 1.75 ms, p95 2.47 ms (200 runs); a one-line script median 2.32 ms. Limits: under 3 MB, under 10 ms.
+Measured on the AWS build box (2026-11-04, x86_64, static, stripped, `-Os`): 2,895,976 bytes; start-up of `rsh -e 'puts 1'` median 2.45 ms (20 runs, min 2.0, max 3.0); `rsh -c nil` median 1.75 ms, p95 2.47 ms (200 runs); a one-line script median 2.32 ms. 0.1.1 (2026-11-04, same box, with eval, binding and ObjectSpace): 2,920,552 bytes; `rsh -c nil` median 1.08 ms against 1.01 ms for 0.1.0 (400 interleaved runs each). Limits: under 3 MB, under 10 ms.
 
 ## Tests
 
 - `tests/unit.cpp`: the reader (statement starts, the command-line rule, the grammar), patterns, argument safety, the `.rb` rule. `make test`.
 - `tests/golden/*.rsh` and `*.rb` with `.out` (standard output and a last line `status: N`), `.explain` (`rsh --explain`) and `.err` (standard error): classification, one-argument interpolation, pipelines, redirects, `&&`/`||`, patterns, here-documents, `Rsh::Failed`.
+- `tests/golden/meta_*.rsh`, `meta_*.rb`: metaprogramming (define_method, method_missing both ways, instance_eval/class_eval, eval and Rsh.eval, hooks, const_missing, ObjectSpace, procs, Struct, Data, `ruby do`, `ruby!`, `rsh_methods`), with and without the shell layer. `examples/meta/*.rsh` run with expected output in `tests/examples/meta/`.
 - `tests/examples/*.rsh`: five whole scripts (deploy, backup, log scan, remote run, a pipeline with Ruby map and filter) with expected output, run with stand-ins for `git`, `make`, `rsync`, `systemctl` and `ssh` from `tests/fakebin/`.
 - `tests/run.sh` runs both (`RSH=path sh run.sh [--update] [name ...]`; `--update` rewrites the expected files, read the diff before keeping it).
 - `tests/interactive.rb` drives the editor through a pseudo-terminal (needs `ruby`, skipped without it).

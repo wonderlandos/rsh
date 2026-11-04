@@ -1,0 +1,45 @@
+mode: shell
+methods: calls initialize method_missing respond_to_missing?
+ruby only: lines 19-27 (a ruby block)
+ruby only: line 32 (a ruby block)
+ruby only: line 36 to the end (ruby!)
+   1 R  # SPDX-License-Identifier: GPL-2.0-or-later
+   2 R  # Bare words the reader cannot know (methods made at run time by method_missing) need one of:
+   3 R  # rsh_methods :name (by name), `ruby do ... end` / `ruby { ... }` (a block), `ruby!` (the rest).
+   4 R  class Recorder
+   5 R    attr_reader :calls
+   6    
+   7 R    def initialize = (@calls = [])
+   8    
+   9 R    def method_missing(name, *args)
+  10 R      @calls << [name, *args]
+  11 R      self
+  12 R    end
+  13    
+  14 R    def respond_to_missing?(*) = true
+  15 R  end
+  16    
+  17 R  r = Recorder.new
+  18 R  r.instance_eval do
+  19 R    ruby do
+  20 R      build "app"
+  21 R      if calls.size == 1
+  22 R        copy "dist", to: "/srv"
+  23 R      end
+  24 R      [1, 2].each do |i|
+  25 R        step i
+  26 R      end
+  27 R    end
+  28 C    echo commands again after the block
+  29 R  end
+  30 R  p r.calls
+  31    
+  32 R  ruby { r.instance_eval { finish } }
+  33 R  p r.calls.last
+  34 C  echo #{r.calls.size} calls
+  35    
+  36 R  ruby!
+  37 R  r.instance_eval { echo "now echo is the Recorder's" }
+  38 R  p r.calls.last
+  39 C  $ echo a leading dollar still runs a program
+  40    

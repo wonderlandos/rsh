@@ -1,0 +1,11 @@
+mode: shell
+methods: twice
+   1 R  # A .rb file has the shell layer, as a .rsh file does: Ruby and command lines mix the same way.
+   2 R  def twice(x) = x * 2
+   3 R  dir = "with space"
+   4 C  mkdir -p #{dir}
+   5 C  echo #{twice(21)} > "#{dir}/n.txt"
+   6 R  puts File.read("#{dir}/n.txt").strip.to_i + 1
+   7 C  ls | { |l| l.upcase }
+   8 C  nosuchcommand_zz || echo not a Ruby method, a command
+   9    

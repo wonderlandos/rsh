@@ -1,0 +1,18 @@
+included in Deployer
+extended Deployer
+prepended to Deployer
+method_added deploy
+inherited by Staging
+[Logged, Deployer, Helpers]
+[:build, :copy]
+before a b
+deploying A B
+after a b: true
+true
+true
+true
+22
+NameError Nope
+["Staging"]
+true
+status: 0

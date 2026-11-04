@@ -1,0 +1,22 @@
+items: 1
+class_eval body runs Box
+from instance_eval
+["h1", 22]
+"h1"
+6
+true
+false
+"kept"
+"from instance_eval,1"
+public_send keeps private private
+send at a statement start is Ruby
+21
+eval is Ruby: NoMethodError
+top level
+two words
+42
+TWO WORDS
+9
+Rsh.eval raises Rsh::Failed: test exited 1
+true
+status: 0

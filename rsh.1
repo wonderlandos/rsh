@@ -41,21 +41,40 @@ it reads the script from standard input (this is how
 sends a script to another computer). With nothing, on a terminal, it is
 interactive.
 .SS Ruby files
-A file whose name ends in
+Every file has the shell layer, whatever its name: a
 .B .rb
-is plain Ruby: the shell layer is off, no line is a command line, and the file means what it
-means in Ruby. A
-.B .rb
-file can ask for the shell layer with the comment
-.B "# rsh: shell"
-as its first line (or as the line after a
+file is read like a
+.B .rsh
+file. A file whose first line (or the line after a
 .B #!
-line). Every other file, and text given with
-.BR \-c ,
-.B \-e
-or
-.BR \-s ,
-has the shell layer.
+line) is the comment
+.B "# rsh: ruby"
+is plain Ruby: no line is a command line, and the file means what it means in Ruby.
+.SS Metaprogramming
+Bare words are classified when the file is read, so a method made at run time (by
+.B method_missing
+or by
+.B define_method
+over a list) is a command unless the file declares it:
+.B "rsh_methods :name, ..."
+names such methods,
+.B "ruby do ... end"
+(or
+.BR "ruby { ... }" )
+makes every bare word inside Ruby, and
+.B ruby!
+alone on a line does that to the end of the file. Literal names after
+.BR define_method ,
+.BR attr_reader ,
+.BR alias_method ,
+.B Struct.new
+and
+.B Data.define
+are known without a declaration.
+.B eval
+is plain Ruby;
+.BI Rsh.eval( text " [, " binding ])
+reads the text with the shell layer.
 .SS How a line is read
 Only the start of a statement is looked at: the start of the file, after a new line or
 .BR ; ,
@@ -268,9 +287,8 @@ Read the script from standard input. Arguments come after
 .BI \-\-name " file"
 With
 .BR \-s :
-the file name the script has, for messages and for the
-.B .rb
-rule above.
+the file name the script has, for messages and
+.BR $0 .
 .TP
 .B \-n
 Read and compile the script and run nothing.

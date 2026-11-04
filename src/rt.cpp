@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 
 #include "exec.hpp"
 #include "glob.hpp"
@@ -297,6 +298,13 @@ bool ends_with(const std::string& s, const char* t) {
     return s.size() >= n && s.compare(s.size() - n, n, t) == 0;
 }
 
+// Methods the shell layer reads as Ruby in an Rsh.eval text: those of every file read so far
+// (def, define_method :x, attr_*, rsh_methods :x, ...) and those named by rsh_methods at run time.
+std::set<std::string>& script_methods() {
+    static std::set<std::string> m;
+    return m;
+}
+
 // Compiles and runs `src` as file `file` at the top level; leaves an exception in mrb->exc.
 void load_text(mrb_state* mrb, const std::string& src, const std::string& file, bool rsh_syntax, bool& syntax_error) {
     syntax_error = false;
@@ -306,6 +314,7 @@ void load_text(mrb_state* mrb, const std::string& src, const std::string& file, 
         if (rsh_syntax) {
             collect_defs(src, dir_of(file), k.methods);
             Result r = transpile(src, file, k);
+            script_methods().insert(k.methods.begin(), k.methods.end());
             if (!r.ok()) {
                 for (auto& d : r.diags)
                     if (!d.warning) std::fprintf(stderr, "rsh: %s:%d: %s\n", file.c_str(), d.line, d.msg.c_str());
@@ -376,6 +385,66 @@ mrb_value m_require(mrb_state* mrb, mrb_value) {
         mrb_exc_raise(mrb, e);
     }
     return mrb_true_value();
+}
+
+// Rsh.__translate(text, file, line, locals): the text read with the shell layer, as Ruby. Bare
+// words that are `locals` (the binding's local variables) or script_methods() stay Ruby.
+mrb_value m_translate(mrb_state* mrb, mrb_value) {
+    mrb_value text, file, locals;
+    mrb_int line;
+    mrb_get_args(mrb, "SSiA", &text, &file, &line, &locals);
+    mrb_value out = mrb_nil_value(), err = mrb_nil_value();
+    {
+        Known k;
+        k.methods = script_methods();
+        for (mrb_int n = 0; n < RARRAY_LEN(locals); ++n) {
+            mrb_value v = mrb_ary_ref(mrb, locals, n);
+            if (mrb_symbol_p(v)) k.locals.insert(mrb_sym_name(mrb, mrb_symbol(v)));
+        }
+        std::string src = cxx(text), f = cxx(file);
+        collect_defs(src, "", k.methods);
+        Result r = transpile(src, f, k, int(line));
+        if (r.ok()) out = str(mrb, r.ruby);
+        else {
+            std::string m;
+            for (auto& d : r.diags)
+                if (!d.warning) m += (m.empty() ? "" : "; ") + f + ":" + std::to_string(d.line) + ": " + d.msg;
+            err = str(mrb, m);
+        }
+    }
+    if (!mrb_nil_p(err)) raise_with(mrb, mrb_class_get(mrb, "SyntaxError"), err);
+    return out;
+}
+
+// Rsh.__load(ruby, file, line): runs Ruby text at the top level (self is main, no caller locals).
+mrb_value m_load(mrb_state* mrb, mrb_value) {
+    mrb_value code;
+    const char* file;
+    mrb_int line;
+    mrb_get_args(mrb, "Szi", &code, &file, &line);
+    mrb_ccontext* c = mrb_ccontext_new(mrb);
+    mrb_ccontext_filename(mrb, c, file);
+    c->lineno = uint16_t(line);
+    c->capture_errors = TRUE;
+    mrb_value v = mrb_load_nstring_cxt(mrb, RSTRING_PTR(code), RSTRING_LEN(code), c);
+    mrb_ccontext_free(mrb, c);
+    if (mrb->exc) {
+        mrb_value e = mrb_obj_value(mrb->exc);
+        mrb->exc = nullptr;
+        mrb_exc_raise(mrb, e);
+    }
+    return v;
+}
+
+// Rsh.__declare(names): rsh_methods at run time (for Rsh.eval texts).
+mrb_value m_declare(mrb_state* mrb, mrb_value) {
+    mrb_value names;
+    mrb_get_args(mrb, "A", &names);
+    for (mrb_int n = 0; n < RARRAY_LEN(names); ++n) {
+        mrb_value v = mrb_ary_ref(mrb, names, n);
+        if (mrb_string_p(v)) script_methods().insert(cxx(v));
+    }
+    return mrb_nil_value();
 }
 
 int RtHost::source(const std::vector<std::string>& a) {
@@ -822,11 +891,10 @@ mrb_ccontext* repl_cxt = nullptr;
 
 }  // namespace
 
-// Does this file get the shell layer? Everything does except a `.rb` file, which is plain Ruby
-// (its text goes to the interpreter unchanged) unless its first line, or the line after a
-// `#!` line, is the comment `# rsh: shell`.
-bool wants_shell_layer(const std::string& file, const std::string& src) {
-    if (!ends_with(file, ".rb")) return true;
+// Does this file get the shell layer? Every file does (`.rsh`, `.rb`, no ending, -c, standard
+// input) unless its first line, or the line after a `#!` line, is the comment `# rsh: ruby`: then
+// its text goes to the interpreter unchanged. `# rsh: shell` there says the default out loud.
+bool wants_shell_layer(const std::string&, const std::string& src) {
     size_t b = 0;
     for (int n = 0; n < 2 && b < src.size(); ++n) {
         size_t e = src.find('\n', b);
@@ -837,15 +905,15 @@ bool wants_shell_layer(const std::string& file, const std::string& src) {
             b = e + 1;
             continue;
         }
-        if (line.compare(0, 1, "#") != 0) return false;
+        if (line.compare(0, 1, "#") != 0) return true;
         size_t k = 1;
         while (k < line.size() && (line[k] == ' ' || line[k] == '\t')) ++k;
-        if (line.compare(k, 4, "rsh:") != 0) return false;
+        if (line.compare(k, 4, "rsh:") != 0) return true;
         k += 4;
         while (k < line.size() && (line[k] == ' ' || line[k] == '\t')) ++k;
-        return line.compare(k, std::string::npos, "shell") == 0;
+        return line.compare(k, std::string::npos, "ruby") != 0;
     }
-    return false;
+    return true;
 }
 
 mrb_state* rt_open(const std::string& script, const std::vector<std::string>& args) {
@@ -870,6 +938,9 @@ mrb_state* rt_open(const std::string& script, const std::vector<std::string>& ar
     mrb_define_module_function(mrb, r, "__require", m_require, MRB_ARGS_REQ(2));
     mrb_define_module_function(mrb, r, "__json_parse", m_json_parse, MRB_ARGS_REQ(2));
     mrb_define_module_function(mrb, r, "__json_str", m_json_str, MRB_ARGS_REQ(1));
+    mrb_define_module_function(mrb, r, "__translate", m_translate, MRB_ARGS_REQ(4));
+    mrb_define_module_function(mrb, r, "__load", m_load, MRB_ARGS_REQ(3));
+    mrb_define_module_function(mrb, r, "__declare", m_declare, MRB_ARGS_REQ(1));
     RClass* re = mrb_define_class(mrb, "Regexp", mrb->object_class);
     MRB_SET_INSTANCE_TT(re, MRB_TT_CDATA);
     mrb_define_method(mrb, re, "initialize", m_re_init, MRB_ARGS_ARG(1, 1));
@@ -959,6 +1030,7 @@ int rt_eval(mrb_state* mrb, const std::string& src, Known& known, bool& exited, 
             return 0;
         }
         known = trial;
+        script_methods().insert(known.methods.begin(), known.methods.end());
         commands = !r.marks.empty();
         code = str(mrb, r.ruby);
     }
@@ -1031,8 +1103,8 @@ int rt_check(mrb_state* mrb, const std::string& src, const std::string& file, bo
                 }
                 if (plain && !name.empty() && !is_builtin(name) && find_program(name).empty() && name[0] != '.' &&
                     name[0] != '/' && name[0] != '~') {
-                    std::fprintf(stderr, "%s:%d: warning: `%s` is taken as a command and is not on PATH; if it is a Ruby method, write %s(...)\n",
-                                 file.c_str(), L.line, name.c_str(), name.c_str());
+                    std::fprintf(stderr, "%s:%d: warning: `%s` is taken as a command and is not on PATH; if it is a Ruby method, write %s(...) or declare it with rsh_methods :%s\n",
+                                 file.c_str(), L.line, name.c_str(), name.c_str(), name.c_str());
                     ++warn;
                 }
                 bool shell_c = (name == "sh" || name == "bash" || name == "zsh") && cmd.words.size() > 1;

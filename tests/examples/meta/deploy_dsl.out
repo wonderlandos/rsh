@@ -1,0 +1,22 @@
+shop 2.0 rc1 on local
+git: <fetch> <--tags>
+git: <checkout> <v2.0 rc1>
+make: <-j4> <VERSION=2.0 rc1>
+release; it's 2.0 rc1 $HOME *
+systemctl: <restart> <shop>
+shop 2.0 rc1 on web1
+[web1] git: <fetch> <--tags>
+[web1] git: <checkout> <v2.0 rc1>
+[web1] make: <-j4> <VERSION=2.0 rc1>
+[web1] release; it's 2.0 rc1 $HOME *
+[web1] systemctl: <restart> <shop>
+shop 2.0 rc1 on down
+down: failed (255) ssh: connect to host down: Connection refused
+shop 2.0 rc1 on web2
+[web2] git: <fetch> <--tags>
+[web2] git: <checkout> <v2.0 rc1>
+[web2] make: <-j4> <VERSION=2.0 rc1>
+[web2] release; it's 2.0 rc1 $HOME *
+[web2] systemctl: <restart> <shop>
+failed on: down
+status: 1

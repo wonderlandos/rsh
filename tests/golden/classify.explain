@@ -1,4 +1,5 @@
 mode: shell
+methods: a helper never
    1 R  #!/usr/bin/rsh
    2 R  # SPDX-License-Identifier: GPL-2.0-or-later
    3 R  # How each line is read: R Ruby, C command line, X a capture inside Ruby (see classify.explain).

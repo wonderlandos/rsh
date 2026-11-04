@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # The interpreter rsh embeds: which gems are compiled in (docs/modules/rsh.md, "What is inside").
-# Left out on purpose: eval and binding (no eval, RB rules), socket (network goes through commands),
-# bigint, rational, complex, task, debugger and the stand-alone tools.
+# eval, binding, proc-binding and objectspace are in for Ruby's metaprogramming (Kernel#eval,
+# instance_eval/class_eval with a String, Binding, ObjectSpace; Rsh.eval adds the shell layer).
+# Left out on purpose: socket (network goes through commands), bigint, rational, complex, task,
+# debugger and the stand-alone tools.
 MRuby::Build.new('rsh') do |conf|
   conf.toolchain :gcc
   conf.cc.flags = %w[-Os -fPIC -ffunction-sections -fdata-sections]
@@ -11,5 +13,5 @@ MRuby::Build.new('rsh') do |conf|
   %w[compiler array-ext string-ext hash-ext enum-ext enumerator enum-lazy numeric-ext kernel-ext
      object-ext proc-ext symbol-ext range-ext compar-ext class-ext toplevel-ext struct data set
      sprintf math time strftime io dir errno pack random sleep exit error catch method metaprog
-     encoding fiber hal-posix-io hal-posix-dir].each { |g| conf.gem core: g.start_with?("hal-") ? g : "mruby-#{g}" }
+     encoding fiber eval binding proc-binding objectspace hal-posix-io hal-posix-dir].each { |g| conf.gem core: g.start_with?("hal-") ? g : "mruby-#{g}" }
 end

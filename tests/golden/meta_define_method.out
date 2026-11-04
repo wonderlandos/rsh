@@ -1,0 +1,11 @@
+site a b; rm -rf /:8080
+stop a b; rm -rf /, then start a b; rm -rf /
+start a b; rm -rf /
+stop a b; rm -rf /
+[:banner, :cycle, :name, :port, :show, :start, :start!, :stop, :stop!]
+true
+0
+5
+(1, 2)
+command: missing_tool_zz exited 127
+status: 0

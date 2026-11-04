@@ -8,7 +8,7 @@ set -u
 here=$(cd "$(dirname "$0")" && pwd)
 top=$here/..
 fail=0
-hits=$(cd "$top" && grep -rniwE 'mruby|matz|cruby|yukihiro' src tests docs rsh.1 README.md CHANGELOG.md .github 2>/dev/null |
+hits=$(cd "$top" && grep -rniwE 'mruby|matz|cruby|yukihiro' src tests docs examples rsh.1 README.md CHANGELOG.md .github 2>/dev/null |
 	grep -v '^tests/doctrine.sh:' | grep -v '#include <mruby' || true)
 if [ -n "$hits" ]; then
 	echo "FAIL doctrine: an upstream name in rsh's own text (say \"the interpreter\"):"

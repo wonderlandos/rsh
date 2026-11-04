@@ -1,0 +1,7 @@
+commands again after the block
+[[:build, "app"], [:copy, "dist", {to: "/srv"}], [:step, 1], [:step, 2]]
+[:finish]
+5 calls
+[:echo, "now echo is the Recorder's"]
+a leading dollar still runs a program
+status: 0

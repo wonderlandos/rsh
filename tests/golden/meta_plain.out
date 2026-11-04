@@ -1,0 +1,12 @@
+"status x"
+"svc ping "
+["status web", "restart db", "svc reload cache"]
+true
+true
+"a local named ls"
+one; two *
+A LOCAL NAMED LS
+true
+:ruby_only
+2
+status: 0

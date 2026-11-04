@@ -1,0 +1,13 @@
+one argument; rm -rf / $HOME *
+5
+c d
+
+true
+false
+false
+1
+NoMethodError Not_a_program
+a command line in the same block
+{server: "web 1", role: [:app, :db], port: 8080}
+true
+status: 0

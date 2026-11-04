@@ -21,7 +21,16 @@ const char* const RUBY_WORDS[] = {
     "rand", "srand", "gets", "warn", "binding", "caller", "Integer", "Float", "String", "Array",
     "Hash", "attr_reader", "attr_writer", "attr_accessor", "private", "public", "protected",
     "module_function", "include", "extend", "define_method", "system", "trap", "freeze",
-    "__method__", nullptr};
+    "__method__",
+    // metaprogramming: these take their arguments without parentheses as often as with them
+    "send", "public_send", "__send__", "eval", "instance_eval", "instance_exec", "class_eval", "class_exec",
+    "module_eval", "module_exec", "define_singleton_method", "instance_variable_get", "instance_variable_set",
+    "remove_method", "undef_method", "alias_method", "prepend", "using", "refine", "private_constant",
+    "public_constant", "private_class_method", "public_class_method", "remove_const", "const_get", "const_set",
+    "singleton_class", "method", "rsh_methods",
+    // conversions every object has, called without a receiver inside methods
+    "to_a", "to_s", "to_h", "to_i", "to_f", "to_sym", "to_proc", "inspect", "dup", "clone", "instance_variables",
+    nullptr};
 
 static const char* const KEYWORDS[] = {
     "alias", "and", "begin", "BEGIN", "break", "case", "class", "def", "defined?", "do", "else",
@@ -564,6 +573,20 @@ struct Tx {
         bool dash;
     };
     std::vector<Heredoc> heredocs;
+    // Ruby-only regions: `ruby do ... end` (closed by the `end` that brings `kw` back below `kw`),
+    // `ruby { ... }` (closed by the `}` of frame `frame`), and `ruby!` (to the end of the file).
+    // `kw` counts the open keyword constructs (class def if ... do ... end).
+    int kw = 0;
+    bool loop_do = false;       // after while/until/for: their `do` opens nothing
+    bool pending_ruby = false;  // `ruby` at a statement start, its `do` or `{` comes next
+    int pending_line = 0;
+    struct Region {
+        int kw;
+        size_t frame;
+        int line;
+    };
+    std::vector<Region> regions;
+    bool plain_rest = false;
 
     Tx(const std::string& src, const std::string& f, int l, Known& k, Result& r)
         : s(src), n(src.size()), file(f), line(l), known(k), res(r) {}
@@ -705,6 +728,7 @@ struct Tx {
         int pad = p.nl - count_nl(call);
         for (int k = 0; k < pad; ++k) out += '\n';
         line += p.nl;
+        if (p.do_block) ++kw;
         res.marks.push_back({ln, 'C', table()[idx].text});
         i = p.i;
         if (p.do_block || (i > 0 && s[i - 1] == '\n')) {
@@ -773,7 +797,9 @@ struct Tx {
 
     bool try_command() {
         bool value_mode = cond || frames.back() == 'G';
-        if (s[i] == '$' && i + 1 < n && blank(s[i + 1])) {
+        bool forced = s[i] == '$' && i + 1 < n && blank(s[i + 1]);
+        if ((plain_rest || !regions.empty()) && !forced) return false;
+        if (forced) {
             i += 2;
             while (i < n && blank(s[i])) ++i;
             command(i, value_mode);
@@ -868,6 +894,8 @@ struct Tx {
                     cond = false;
                 }
                 rescue_line = false;
+                loop_do = false;
+                pending_ruby = false;
                 continue;
             }
             bool sp = space;
@@ -881,6 +909,7 @@ struct Tx {
             if (c == ';') {
                 out += ';';
                 ++i;
+                loop_do = false;
                 stmt = true;
                 cond = false;
                 prev = Start;
@@ -890,6 +919,7 @@ struct Tx {
                 cond = false;
                 continue;
             }
+            bool at_start = stmt;
             stmt = false;
             cond = false;
             bool dot = after_dot;
@@ -933,14 +963,53 @@ struct Tx {
                     continue;
                 }
                 if (is_keyword(w)) {
+                    Prev before = prev;
                     copy(j);
+                    if (w == "class" || w == "module" || w == "case" || w == "begin") ++kw;
+                    else if (w == "if" || w == "unless" || w == "while" || w == "until") {
+                        if (before != Value || at_start) {  // not a modifier
+                            ++kw;
+                            if (w == "while" || w == "until") loop_do = true;
+                        }
+                    } else if (w == "for") ++kw, loop_do = true;
+                    else if (w == "do") {
+                        if (loop_do) loop_do = false;
+                        else ++kw;
+                        if (pending_ruby) {
+                            regions.push_back({kw, 0, pending_line});
+                            pending_ruby = false;
+                        }
+                    } else if (w == "end") {
+                        --kw;
+                        if (!regions.empty() && regions.back().frame == 0 && kw < regions.back().kw) {
+                            res.ruby_spans.push_back({regions.back().line, line});
+                            regions.pop_back();
+                        }
+                    }
                     if (w == "def") {
                         size_t k = i;
                         while (k < n && blank(s[k])) ++k;
                         if (s.compare(k, 5, "self.") == 0) k += 5;
                         size_t b = k;
                         while (k < n && (ident_char(s[k]) || s[k] == '?' || s[k] == '!' || s[k] == '=')) ++k;
-                        if (k > b) known.methods.insert(s.substr(b, k - b));
+                        if (k == b)  // an operator: def <=>(o), def ==(o), def [](i), def -@
+                            while (k < n && std::strchr("+-*/%<=>!~^&|[]@", s[k])) ++k;
+                        if (k > b && ident_start(s[b])) known.methods.insert(s.substr(b, k - b));
+                        {  // `def name(args) = expr` has no `end`
+                            size_t q = k;
+                            while (q < n && blank(s[q])) ++q;
+                            if (q < n && s[q] == '(') {
+                                int d = 0;
+                                for (; q < n && s[q] != '\n'; ++q) {
+                                    if (s[q] == '(') ++d;
+                                    else if (s[q] == ')' && --d == 0) break;
+                                }
+                                if (q < n && s[q] == ')') ++q;
+                                while (q < n && blank(s[q])) ++q;
+                            }
+                            bool endless = q + 1 < n && s[q] == '=' && !std::strchr("=~>", s[q + 1]);
+                            if (!endless) ++kw;
+                        }
                         size_t e = s.find('\n', k);
                         record_idents(s.substr(k, (e == std::string::npos ? n : e) - k));
                         copy(k);
@@ -970,6 +1039,27 @@ struct Tx {
                         prev = Op;
                     } else prev = Value;
                     continue;
+                }
+                if (at_start && w == "ruby" && !known.locals.count(w)) {
+                    size_t k = j;
+                    while (k < n && blank(s[k])) ++k;
+                    if ((s.compare(k, 2, "do") == 0 && (k + 2 >= n || !ident_char(s[k + 2]))) || (k < n && s[k] == '{')) {
+                        pending_ruby = true;
+                        pending_line = line;
+                    }
+                }
+                if (at_start && w == "ruby!" && !plain_rest) {
+                    size_t k = j;
+                    while (k < n && blank(s[k])) ++k;
+                    if (k >= n || s[k] == '\n' || s[k] == '#' || s[k] == ';') {
+                        plain_rest = true;
+                        res.ruby_spans.push_back({line, 0});
+                    }
+                }
+                if (w == "define_method" || w == "define_singleton_method" || w == "alias_method" || w == "rsh_methods" ||
+                    w == "attr_reader" || w == "attr_accessor" || w == "attr_writer") {  // names for the lines after
+                    size_t e = s.find('\n', i);
+                    declared_names(s.substr(i, (e == std::string::npos ? n : e) - i), known.methods);
                 }
                 if (assigned(j)) known.locals.insert(w);
                 if (rescue_line && out.size() >= 2) {
@@ -1084,9 +1174,13 @@ struct Tx {
                 }
             }
             if (c == '{') {
-                bool block = prev == Value || lam;
+                bool block = (prev == Value && !at_start) || lam;
                 frames.push_back(block ? 'B' : 'H');
                 copy(i + 1);
+                if (block && pending_ruby) {
+                    regions.push_back({kw, frames.size(), pending_line});
+                    pending_ruby = false;
+                }
                 if (block) {
                     block_params();
                     prev = Start;
@@ -1096,13 +1190,27 @@ struct Tx {
             }
             if (c == '}') {
                 if (interp && frames.size() == depth0) return;
+                if (!regions.empty() && regions.back().frame == frames.size()) {
+                    res.ruby_spans.push_back({regions.back().line, line});
+                    regions.pop_back();
+                }
                 if (frames.size() > 1) frames.pop_back();
                 copy(i + 1);
                 prev = Value;
                 continue;
             }
+            if (c == '(' && lam) {  // ->(a, b = 1) { ... }: parameters, then the body
+                size_t k = i + 1;
+                int d = 1;
+                for (; k < n && d; ++k) d += s[k] == '(' ? 1 : s[k] == ')' ? -1 : 0;
+                record_idents(s.substr(i + 1, k - i - 2));
+                copy(k);
+                lambda = true;
+                prev = Op;
+                continue;
+            }
             if (c == '(') {
-                bool call = prev == Value;
+                bool call = prev == Value && !at_start;  // at a statement start it groups
                 frames.push_back(call ? 'P' : 'G');
                 copy(i + 1);
                 if (!call) {
@@ -1150,11 +1258,105 @@ std::string fragment(const std::string& src, const std::string& file, int line, 
     Tx t(src, file, line, known, res);
     t.stmt = false;
     t.prev = Tx::Op;
+    // A #{...} value is an expression, as in a Ruby string: `echo #{name}` calls the method `name`.
+    t.plain_rest = !src.empty() && src[0] == '(';
     t.code(false);
     return t.out;
 }
 
 }  // namespace
+
+// The method names written after a declaring word, from `ln[k]` on: `:a, :b`, `"a"`, `'a'`,
+// `%i[a b]`, `%w[a b]`, with or without parentheses; with `bare` also a bare word (`alias new old`;
+// elsewhere a bare word is a variable, not a name). With `first` only the first name counts
+// (define_method :name, alias_method :new, :old).
+void literal_names(const std::string& ln, size_t k, std::set<std::string>& out, bool first, bool bare) {
+    auto name_ok = [](const std::string& n) { return !n.empty() && ident_start(n[0]) && !std::isupper((unsigned char)n[0]); };
+    while (k < ln.size() && (blank(ln[k]) || ln[k] == '(')) ++k;
+    while (k < ln.size()) {
+        std::string n;
+        char c = ln[k];
+        if (c == ':' && k + 1 < ln.size() && ident_start(ln[k + 1])) {
+            size_t b = ++k;
+            while (k < ln.size() && ident_char(ln[k])) ++k;
+            if (k < ln.size() && (ln[k] == '?' || ln[k] == '!')) ++k;
+            n = ln.substr(b, k - b);
+        } else if (c == '"' || c == '\'') {
+            size_t e = ln.find(c, k + 1);
+            if (e == std::string::npos) return;
+            n = ln.substr(k + 1, e - k - 1);
+            if (n.find("#{") != std::string::npos) return;
+            k = e + 1;
+        } else if (c == '%' && k + 2 < ln.size() && (ln[k + 1] == 'i' || ln[k + 1] == 'w') &&
+                   std::strchr("[({<", ln[k + 2])) {
+            char open = ln[k + 2];
+            char close = open == '[' ? ']' : open == '(' ? ')' : open == '{' ? '}' : '>';
+            size_t e = ln.find(close, k + 3);
+            if (e == std::string::npos) return;
+            std::string body = ln.substr(k + 3, e - k - 3);
+            size_t b = 0;
+            while (b < body.size()) {
+                while (b < body.size() && blank(body[b])) ++b;
+                size_t f = b;
+                while (f < body.size() && !blank(body[f])) ++f;
+                std::string w = body.substr(b, f - b);
+                if (name_ok(w)) out.insert(w);
+                b = f;
+            }
+            k = e + 1;
+            if (first) return;
+        } else if (ident_start(c)) {
+            size_t b = k;
+            while (k < ln.size() && ident_char(ln[k])) ++k;
+            if (k < ln.size() && (ln[k] == '?' || ln[k] == '!')) ++k;
+            n = ln.substr(b, k - b);
+            if (!bare) return;  // a variable: not a literal name
+        } else return;
+        if (name_ok(n)) out.insert(n);
+        if (first) return;
+        while (k < ln.size() && blank(ln[k])) ++k;
+        if (k >= ln.size() || ln[k] != ',') return;
+        ++k;
+        while (k < ln.size() && blank(ln[k])) ++k;
+    }
+}
+
+// Words after which literal names are methods the script makes at run time.
+struct Declarer {
+    const char* word;
+    bool first;  // only the first name
+};
+static const Declarer DECLARERS[] = {
+    {"define_method", true},  {"define_singleton_method", true}, {"alias_method", true}, {"alias", true},
+    {"attr_reader", false},   {"attr_accessor", false},          {"attr_writer", false}, {"rsh_methods", false},
+    {"Struct.new", false},    {"Data.define", false},            {nullptr, false}};
+
+// Every declaring word in one line of text (not only at its start), up to a comment.
+void declared_names(const std::string& line, std::set<std::string>& out) {
+    std::string ln = line;
+    char q = 0;
+    for (size_t k = 0; k < ln.size(); ++k) {
+        char c = ln[k];
+        if (q) {
+            if (c == '\\') ++k;
+            else if (c == q) q = 0;
+        } else if (c == '"' || c == '\'') q = c;
+        else if (c == '#' && !(k + 1 < ln.size() && ln[k + 1] == '{')) {
+            ln.resize(k);
+            break;
+        }
+    }
+    for (const Declarer* d = DECLARERS; d->word; ++d) {
+        size_t len = std::strlen(d->word);
+        for (size_t at = ln.find(d->word); at != std::string::npos; at = ln.find(d->word, at + 1)) {
+            if (at > 0 && (ident_char(ln[at - 1]) || ln[at - 1] == ':' || ln[at - 1] == '@' || ln[at - 1] == '$')) continue;
+            size_t k = at + len;
+            if (k < ln.size() && !blank(ln[k]) && ln[k] != '(') continue;
+            if (!std::strcmp(d->word, "alias") && k < ln.size() && ln[k] == '(') continue;
+            literal_names(ln, k, out, d->first, !std::strcmp(d->word, "alias"));
+        }
+    }
+}
 
 void collect_defs(const std::string& src, const std::string& dir, std::set<std::string>& out, int depth) {
     size_t i = 0;
@@ -1163,6 +1365,9 @@ void collect_defs(const std::string& src, const std::string& dir, std::set<std::
         if (e == std::string::npos) e = src.size();
         std::string ln = trim(src.substr(i, e - i));
         i = e + 1;
+        declared_names(ln, out);
+        for (const char* mod : {"private ", "protected ", "public ", "module_function "})
+            if (ln.compare(0, std::strlen(mod), mod) == 0) ln = trim(ln.substr(std::strlen(mod)));
         if (ln.compare(0, 4, "def ") == 0) {
             size_t k = 4;
             while (k < ln.size() && blank(ln[k])) ++k;
@@ -1193,9 +1398,9 @@ void collect_defs(const std::string& src, const std::string& dir, std::set<std::
     }
 }
 
-Result transpile(const std::string& src, const std::string& file, Known& known) {
+Result transpile(const std::string& src, const std::string& file, Known& known, int first_line) {
     Result res;
-    Tx t(src, file, 1, known, res);
+    Tx t(src, file, first_line, known, res);
     t.code(false);
     res.ruby = std::move(t.out);
     return res;

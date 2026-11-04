@@ -1,7 +1,7 @@
 #!/usr/bin/rsh
+# rsh: ruby
 # SPDX-License-Identifier: GPL-2.0-or-later
-# A .rb file is plain Ruby: no line is a command line, whatever its first word.
-# rsh: shell   (not on the first line, so it changes nothing)
+# `# rsh: ruby` after the shebang: plain Ruby, no line is a command line, whatever its first word.
 def twice(x)
   x * 2
 end

@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 #include <string>
 
 #include "exec.hpp"
@@ -71,30 +72,84 @@ static std::vector<std::string> argv_of(const std::string& text, std::vector<Val
 }
 
 static void test_modes() {
-    // everything but a .rb file has the shell layer
+    // every file has the shell layer, whatever its name
     CHECK(wants_shell_layer("x.rsh", "puts 1\n"));
     CHECK(wants_shell_layer("-c", "echo hi"));
     CHECK(wants_shell_layer("script", "echo hi"));
-    // a .rb file is plain Ruby ...
-    CHECK(!wants_shell_layer("x.rb", ""));
-    CHECK(!wants_shell_layer("x.rb", "puts 1\n"));
-    CHECK(!wants_shell_layer("dir/x.rb", "#!/usr/bin/rsh\nputs 1\n"));
-    // ... unless the first line (or the one after a #! line) is the opt-in comment
+    CHECK(wants_shell_layer("x.rb", ""));
+    CHECK(wants_shell_layer("x.rb", "puts 1\n"));
+    CHECK(wants_shell_layer("dir/x.rb", "#!/usr/bin/rsh\nputs 1\n"));
     CHECK(wants_shell_layer("x.rb", "# rsh: shell\necho hi\n"));
-    CHECK(wants_shell_layer("x.rb", "#rsh:shell\n"));
-    CHECK(wants_shell_layer("x.rb", "# rsh: shell"));
-    CHECK(wants_shell_layer("x.rb", "# rsh:   shell  \r\necho hi\n"));
-    CHECK(wants_shell_layer("x.rb", "#!/usr/bin/rsh\n# rsh: shell\necho hi\n"));
-    CHECK(!wants_shell_layer("x.rb", "\n# rsh: shell\n"));
-    CHECK(!wants_shell_layer("x.rb", "puts 1\n# rsh: shell\n"));
-    CHECK(!wants_shell_layer("x.rb", "#!/usr/bin/rsh\nputs 1\n# rsh: shell\n"));
-    CHECK(!wants_shell_layer("x.rb", "# rsh: shell now\n"));
-    CHECK(!wants_shell_layer("x.rb", "# rsh: ruby\n"));
-    CHECK(!wants_shell_layer("x.rb", "# frozen_string_literal: true\n# rsh: shell\n"));
+    // ... unless the first line (or the one after a #! line) is `# rsh: ruby`
+    CHECK(!wants_shell_layer("x.rb", "# rsh: ruby\nputs 1\n"));
+    CHECK(!wants_shell_layer("x.rsh", "# rsh: ruby\n"));
+    CHECK(!wants_shell_layer("x.rb", "#rsh:ruby\n"));
+    CHECK(!wants_shell_layer("x.rb", "# rsh: ruby"));
+    CHECK(!wants_shell_layer("x.rb", "# rsh:   ruby  \r\nputs 1\n"));
+    CHECK(!wants_shell_layer("x.rb", "#!/usr/bin/rsh\n# rsh: ruby\nputs 1\n"));
+    CHECK(wants_shell_layer("x.rb", "\n# rsh: ruby\n"));
+    CHECK(wants_shell_layer("x.rb", "puts 1\n# rsh: ruby\n"));
+    CHECK(wants_shell_layer("x.rb", "#!/usr/bin/rsh\nputs 1\n# rsh: ruby\n"));
+    CHECK(wants_shell_layer("x.rb", "# rsh: ruby now\n"));
+    CHECK(wants_shell_layer("x.rb", "# frozen_string_literal: true\n# rsh: ruby\n"));
+}
+
+// Metaprogramming: which bare words the rule knows are methods, and the Ruby-only regions.
+static void test_meta() {
+    std::set<std::string> m;
+    declared_names("define_method(:build) { }", m);
+    declared_names("define_method :lint do", m);
+    declared_names("attr_reader :name, :age", m);
+    declared_names("attr_accessor(:color)", m);
+    declared_names("rsh_methods :server, \"role\", 'task'", m);
+    declared_names("rsh_methods %i[up down]", m);
+    declared_names("alias_method :push, :deploy", m);
+    declared_names("alias shout yell", m);
+    declared_names("Point = Struct.new(:px, :py)", m);
+    declared_names("Pair = Data.define(:left, :right)", m);
+    declared_names("define_singleton_method(:solo) { 1 }", m);
+    for (const char* w : {"build", "lint", "name", "age", "color", "server", "role", "task", "up", "down", "push", "shout",
+                          "px", "py", "left", "right", "solo"})
+        CHECK(m.count(w));
+    for (const char* w : {"deploy", "yell", "t", "n"}) CHECK(!m.count(w));
+    std::set<std::string> v;
+    declared_names("%w[a b].each { |t| define_method(t) { } }", v);  // a variable: unknown before run time
+    declared_names("define_method(\"x_#{n}\") { }", v);
+    declared_names("my_define_method :zz", v);
+    declared_names("puts \"rsh_methods\"", v);
+    CHECK(v.empty());
+    // a name made by define_method or declared is Ruby, even before its line
+    CHECK(kinds("build\nclass T\n  define_method(:build) { }\nend") == "RRRR");
+    CHECK(kinds("name\nattr_reader :name") == "RR");
+    CHECK(kinds("server x\nrsh_methods :server") == "RR");
+    CHECK(kinds("server x\nrole y") == "CC");
+    // metaprogramming words take arguments without parentheses
+    CHECK(!is_cmd("send :hi, 2"));
+    CHECK(!is_cmd("public_send :hi"));
+    CHECK(!is_cmd("prepend Hook"));
+    CHECK(!is_cmd("class_eval <<~RUBY"));
+    CHECK(!is_cmd("instance_eval code"));
+    // operator methods: the parameter is not a command
+    CHECK(kinds("def <=>(o) = n <=> o.n") == "R");
+    CHECK(kinds("def ==(other)\n  other\nend") == "RRR");
+    // ruby do ... end, ruby { }, ruby!
+    CHECK(kinds("ruby do\n  deploy x\nend\nls") == "RRRC");
+    CHECK(kinds("ruby {\n  deploy x\n}\nls") == "RRRC");
+    CHECK(kinds("ruby do\n  if a\n    b c\n  end\n  [1].each do |i|\n    d e\n  end\n  while f do\n    g\n  end\nend\nls") ==
+          "RRRRRRRRRRRC");
+    CHECK(kinds("ruby do\n  def x = 1\n  y z\nend\nls") == "RRRRC");
+    CHECK(kinds("ruby do\n  x = 1 if a\n  y z\nend\nls") == "RRRRC");
+    CHECK(kinds("ruby do\n  $ ls\nend") == "RCR");  // `$ ` still forces a command line
+    CHECK(kinds("ls\nruby!\nls\nfoo bar") == "CRRR");
+    CHECK(kinds("ruby -v") == "C");  // the program
+    CHECK(kinds("ruby script.rb do") == "ERR");
+    Result r = tx("ruby do\n  a\nend\nruby!\nb");
+    CHECK(r.ruby_spans.size() == 2 && r.ruby_spans[0] == std::make_pair(1, 3) && r.ruby_spans[1] == std::make_pair(4, 0));
 }
 
 int main() {
     test_modes();
+    test_meta();
     // -- the rule: what is a command line
     CHECK(is_cmd("git pull --ff-only"));
     CHECK(is_cmd("ls -l"));

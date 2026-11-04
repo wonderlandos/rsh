@@ -1,0 +1,43 @@
+mode: shell
+methods: extended fetch initialize pack run step steps version
+   1 R  #!/usr/bin/rsh
+   2 R  # SPDX-License-Identifier: GPL-2.0-or-later
+   3 R  # A .rb file has the shell layer: metaprogramming and command lines in the same file.
+   4 R  module Steps
+   5 R    def self.extended(base) = (base.instance_variable_set(:@steps, []))
+   6    
+   7 R    def step(name, &body)
+   8 R      @steps << name
+   9 R      define_method(name, &body)
+  10 R    end
+  11    
+  12 R    def steps = @steps
+  13 R  end
+  14    
+  15 R  class Release
+  16 R    extend Steps
+  17 R    rsh_methods :fetch, :pack
+  18    
+  19 R    step :fetch do
+  20 C      echo fetching #{version}
+  21 R    end
+  22    
+  23 R    step :pack do
+  24 C      echo "packing #{version}" | tr a-z A-Z
+  25 R    end
+  26    
+  27 R    attr_reader :version
+  28    
+  29 R    def initialize(version) = (@version = version)
+  30    
+  31 R    def run
+  32 R      fetch
+  33 R      pack
+  34 R      self.class.steps.size
+  35 R    end
+  36 R  end
+  37    
+  38 R  p Release.steps
+  39 R  p Release.new("1.0 beta").run
+  40 R  p Release.instance_method(:fetch).arity
+  41    

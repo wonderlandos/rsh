@@ -1,0 +1,38 @@
+mode: ruby (the shell layer is off: `# rsh: ruby` on the first line)
+   1 R  # rsh: ruby
+   2 R  # SPDX-License-Identifier: GPL-2.0-or-later
+   3 R  # Plain Ruby (the shell layer off): every bare word is Ruby, so methods made at run time need no
+   4 R  # declaration. Commands go through Rsh.run (one argument each) or Rsh.eval (the shell layer).
+   5 R  class Ops
+   6 R    %w[status restart].each do |verb|
+   7 R      define_method(verb) { |unit| "#{verb} #{unit}" }
+   8 R    end
+   9    
+  10 R    def method_missing(name, *args)
+  11 R      return super unless name.to_s.start_with?("svc_")
+  12 R      "svc #{name.to_s.delete_prefix("svc_")} #{args.join(" ")}"
+  13 R    end
+  14    
+  15 R    def respond_to_missing?(name, priv = false) = name.to_s.start_with?("svc_") || super
+  16    
+  17 R    def all
+  18 R      [status("web"), restart("db"), svc_reload("cache")]
+  19 R    end
+  20 R  end
+  21    
+  22 R  o = Ops.new
+  23 R  o.instance_eval do
+  24 R    p status("x")
+  25 R    p svc_ping
+  26 R  end
+  27 R  p o.all
+  28 R  p o.respond_to?(:svc_any), Ops.method_defined?(:restart)
+  29    
+  30 R  ls = "a local named ls"
+  31 R  p ls
+  32 R  Rsh.run("echo", "one; two", "*")
+  33 R  p Rsh.eval('echo #{ls} | tr a-z A-Z', binding)
+  34 R  code = "def from_eval = :ruby_only\nfrom_eval"
+  35 R  p eval(code)
+  36 R  p Rsh.eval("x = 1\nx + 1")
+  37    

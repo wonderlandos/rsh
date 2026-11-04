@@ -1,0 +1,8 @@
+== clean
+== build
+make: <all> <VERSION=2.1 rc>
+== check
+1 file(s) in build
+== default
+done 2.1 rc
+status: 0

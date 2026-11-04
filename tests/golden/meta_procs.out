@@ -1,0 +1,30 @@
+6
+6
+3
+true
+[1, nil]
+[1, 2]
+2
+false
+"ABAB"
+["A", "B"]
+x y z
+42
+[10, 20]
+Integer
+UnboundMethod
+[0, 1, 4]
+[1, 5]
+0.9 1.2 1.10
+1.10
+true
+0.9
+[:major, :minor]
+{major: 3, minor: 4}
+7
+{x: 3, y: -4}
+#<data Point x=3, y=0>
+true
+false
+false
+status: 0

@@ -1,6 +1,6 @@
 mode: shell
    1 R  # rsh: shell
-   2 R  # A .rb file with the opt-in on its first line gets the shell layer.
+   2 R  # `# rsh: shell` on the first line says the default out loud: a .rb file has the shell layer.
    3 C  echo hello from the shell layer
    4 R  name = "x y"
    5 C  echo #{name} && echo second

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // rsh: Ruby with command lines. `rsh file [args]` runs a script (also through `#!/usr/bin/rsh`),
-// `rsh` alone on a terminal is interactive. A `.rb` file runs as plain Ruby (no shell layer)
-// unless its first line is `# rsh: shell`. See rsh(1) and docs/rsh.md.
+// `rsh` alone on a terminal is interactive. Every file (`.rsh` or `.rb`) has the shell layer; a
+// first line `# rsh: ruby` turns it off (plain Ruby). See rsh(1) and docs/rsh.md.
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -24,7 +24,7 @@ const char* USAGE =
     "usage: rsh [options] [file [arguments]]\n"
     "  -c TEXT     run TEXT (-e is the same)\n"
     "  -s          read the script from standard input (arguments follow, after --)\n"
-    "  --name FILE with -s: the file name to use in messages and for the .rb rule (plain Ruby)\n"
+    "  --name FILE with -s: the file name to use in messages and in $0\n"
     "  -n          check the script: read and compile it, run nothing\n"
     "  --lint      -n, plus warnings (unknown commands, risky forms)\n"
     "  --explain   show the mode and how each line is read: C command line, R Ruby, X a capture inside Ruby\n"
@@ -368,7 +368,7 @@ int main(int argc, char** argv) {
     }
     for (; i < argc; ++i) args.push_back(argv[i]);
 
-    // A .rb file is plain Ruby (the shell layer off) unless it opts in with `# rsh: shell`.
+    // The shell layer is on unless the file starts with `# rsh: ruby` (after a `#!` line, if any).
     const bool shell = wants_shell_layer(file, src);
 
     if (explain || show_ruby) {
@@ -382,7 +382,19 @@ int main(int argc, char** argv) {
         for (auto& d : r.diags) std::fprintf(stderr, "%s:%d: %s\n", file.c_str(), d.line, d.msg.c_str());
         if (show_ruby) std::fputs(r.ruby.c_str(), stdout);
         else {
-            std::printf("mode: %s\n", shell ? "shell" : "ruby (the shell layer is off; `# rsh: shell` as the first line turns it on)");
+            std::printf("mode: %s\n", shell ? "shell" : "ruby (the shell layer is off: `# rsh: ruby` on the first line)");
+            // The names the rule reads as Ruby methods (def, define_method :x, attr_*, rsh_methods, ...),
+            // and the lines where no bare word is a command.
+            if (shell && !k.methods.empty()) {
+                std::string m;
+                for (auto& x : k.methods) m += " " + x;
+                std::printf("methods:%s\n", m.c_str());
+            }
+            for (auto& sp : r.ruby_spans) {
+                if (sp.second == sp.first) std::printf("ruby only: line %d (a ruby block)\n", sp.first);
+                else if (sp.second) std::printf("ruby only: lines %d-%d (a ruby block)\n", sp.first, sp.second);
+                else std::printf("ruby only: line %d to the end (ruby!)\n", sp.first);
+            }
             std::vector<char> kind;
             size_t n = 1;
             for (char c : src) n += c == '\n';

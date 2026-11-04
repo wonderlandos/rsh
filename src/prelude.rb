@@ -100,6 +100,21 @@ module Rsh
   def self.run(*argv)
     __finish(__argv(argv.flatten.map(&:to_s), 0)).success?
   end
+
+  # Runs a text with the shell layer: its command lines run, as in a file. Without a binding it
+  # runs at the top level (self is main, no local variables of the caller); with one
+  # (Rsh.eval(text, binding)) it sees that binding's self and local variables. Kernel#eval is
+  # plain Ruby and never runs a command line.
+  def self.eval(text, bind = nil, file = "(rsh eval)", line = 1)
+    locals = bind ? bind.local_variables : []
+    code = __translate(text.to_s, file.to_s, line, locals)
+    bind ? bind.eval(code, file.to_s, line) : __load(code, file.to_s, line)
+  end
+
+  # The Ruby text rsh runs for this text (what Rsh.eval would run).
+  def self.translate(text, file = "(rsh eval)", line = 1)
+    __translate(text.to_s, file.to_s, line, [])
+  end
 end
 
 def relaxed!(on = true)
@@ -143,6 +158,36 @@ module Kernel
 
   def `(_text)
     raise Rsh::Error, "this capture was built at run time; write it in the script as `...` so values stay single arguments"
+  end
+
+  # rsh_methods :deploy, :restart: these bare words are Ruby method calls, not commands (methods a
+  # script makes at run time, with method_missing or define_method over a list). The reader sees
+  # the literal names in the file; at run time the call only adds them for Rsh.eval texts.
+  # Kernel#warn (the built-in interpreter has none): the messages on standard error.
+  def warn(*msgs, **)
+    msgs.flatten.each { |m| $stderr.puts(m.to_s) }
+    nil
+  end
+
+  # Kernel#abort: the message on standard error, then exit 1.
+  def abort(msg = nil)
+    $stderr.puts(msg.to_s) if msg
+    exit 1
+  end
+
+  def rsh_methods(*names)
+    Rsh.__declare(names.flatten.map(&:to_s))
+    nil
+  end
+
+  # ruby do ... end, ruby { ... }: no bare word inside is a command line (the reader decides that;
+  # here it only runs the block). ruby! does the same for the rest of the file.
+  def ruby
+    yield
+  end
+
+  def ruby!
+    nil
   end
 
   def require(name)
@@ -601,12 +646,12 @@ class String
   end
 
   def sub(pattern, rep = nil, &block)
-    return __rsh_plain_sub(pattern, rep, &block) unless pattern.is_a?(Regexp)
+    return (rep.nil? ? __rsh_plain_sub(pattern, &block) : __rsh_plain_sub(pattern, rep)) unless pattern.is_a?(Regexp)
     __rsh_replace(pattern, rep, false, &block)
   end
 
   def gsub(pattern, rep = nil, &block)
-    return __rsh_plain_gsub(pattern, rep, &block) unless pattern.is_a?(Regexp)
+    return (rep.nil? ? __rsh_plain_gsub(pattern, &block) : __rsh_plain_gsub(pattern, rep)) unless pattern.is_a?(Regexp)
     __rsh_replace(pattern, rep, true, &block)
   end
 
@@ -692,4 +737,41 @@ class Symbol
   def match(*args)
     to_s.match(*args)
   end
+end
+
+# instance_eval and class_eval with a String: the interpreter would leave the receiver as the
+# place where `def` and `class` go for the rest of the calling scope (a top-level `def` after
+# A.class_eval("...") landed in A). Called from here, the text gets its own scope: it does not see
+# the caller's local variables (pass values in with #{} or use the block form, which does).
+class Module
+  # Queries the built-in interpreter leaves out.
+  def private_method_defined?(name, inherit = true) = private_instance_methods(inherit).include?(name.to_sym)
+  def public_method_defined?(name, inherit = true) = public_instance_methods(inherit).include?(name.to_sym)
+  def protected_method_defined?(name, inherit = true) = protected_instance_methods(inherit).include?(name.to_sym)
+
+  alias __rsh_class_eval class_eval
+
+  def class_eval(*__rsh_args, &__rsh_block)
+    return __rsh_class_eval(&__rsh_block) if __rsh_block
+    __rsh_class_eval(*__rsh_args)
+  end
+
+  def module_eval(*__rsh_args, &__rsh_block)
+    return __rsh_class_eval(&__rsh_block) if __rsh_block
+    __rsh_class_eval(*__rsh_args)
+  end
+end
+
+class BasicObject
+  alias __rsh_instance_eval instance_eval
+
+  def instance_eval(*__rsh_args, &__rsh_block)
+    return __rsh_instance_eval(&__rsh_block) if __rsh_block
+    __rsh_instance_eval(*__rsh_args)
+  end
+end
+
+class Data
+  # A copy with some members changed (Data#with).
+  def with(**changes) = changes.empty? ? self : self.class.new(**to_h.merge(changes))
 end
