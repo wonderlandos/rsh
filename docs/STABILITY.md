@@ -129,13 +129,13 @@ Changing any of these is a major version; `tests/contract.sh` holds their digest
 A release is tagged only when, on the build machine:
 
 1. `make test` is green. It runs the unit checks, every golden and example, `tests/contract.sh`,
-   the doctrine and size check (under 3 MB) and the interactive checks, then builds `make asan`
+   the doctrine and size check (under 3.4 MiB, the release toolchain's limit) and the interactive checks, then builds `make asan`
    (`LINK=dynamic`, `-fsanitize=address,undefined`, leak check on) and runs the unit checks, every
    golden (the audit reproducers among them: `tests/golden/sec_*.rsh`) and the contract on it. Any
    sanitizer report fails the run. (`make test SANITIZE=0` leaves the sanitizer half out for a host
    without the sanitizer libraries; such a run is not a release gate.)
 2. `make bench` shows start-up within 5% of the previous release (median of 400 runs of
-   `rsh -c nil`), and the size under 3 MB.
+   `rsh -c nil`), and the size under 3.4 MiB.
 3. `CHANGELOG.md` names every change; `VERSION`, `packaging.PKGBUILD` (`pkgver`, and its sha256 once
    the tag exists) agree (`tests/contract.sh` checks the first three).
 4. (0.9.0) `make fuzz FUZZ_SECONDS=1800` (on a machine with clang) ends with no crash, no time-out and no

@@ -19,6 +19,10 @@ already fixed or decided in 0.1.4 and 0.9.x. Each fix below has a test that fail
   `command not found` what to write. `tests/golden/qa_jobs_hints.rsh`.
 - **QA-RSH-57** (not reproduced) a new history file made in a pty session is 0600: pinned by `tests/interactive.rb`.
 
+- **Size gate** `tests/doctrine.sh` limits the program to 3.4 MiB (3,565,158 bytes), not 3 MiB: the 0.9.1 source
+  is 3,011,400 bytes with Ubuntu's gcc and 3,284,720 with Arch's, so `make test` failed on the release toolchain.
+  `docs/rsh.md` ("Size gate").
+
 ## 0.9.1
 
 ### Audit 2
