@@ -16,7 +16,7 @@ _mruby_commit=831da26b9021de0369d17b71b5667e2941a1a32d
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
         "mruby-$_mruby_commit.tar.gz::https://github.com/mruby/mruby/archive/$_mruby_commit.tar.gz")
 noextract=("mruby-$_mruby_commit.tar.gz")
-sha256sums=('<sha256 of rsh-0.1.0.tar.gz: curl -fsSL https://github.com/wonderlandos/rsh/archive/refs/tags/v0.1.0.tar.gz | sha256sum>'
+sha256sums=('af61aff7d74d6b3551b7794256edbd296ebccbed3ac01407e52f2bbe4718ebd7'
             'e4fb1bbad8276878e84e3c3b6161ac35a4216853de404f8463675aa2d1920b4f')
 
 build() {
