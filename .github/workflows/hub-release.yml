@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# WolOS Hub: a pushed version tag becomes a GitHub release with wonderlandos.rsh-<version>.wol,
+# checked with the hub's own hubcheck first. Listing wonderlandos.rsh (connected on hub.wolos.org as wonderlandos).
+# Tag: v<pkgver>-<pkgrel>, e.g. v0.9.1-1 (the .wol version is the payload's pacman version).
+name: hub-release
+on:
+  push:
+    tags: ["v[0-9]*-[0-9]*"]   # v<pkgver>-<pkgrel> only: the source tags v<pkgver> are not hub releases
+permissions:
+  contents: write
+jobs:
+  hub:
+    # Pin to a commit of wonderlandos/hub once tools/wolpack and this workflow are on its main.
+    uses: wonderlandos/hub/.github/workflows/wol-release.yml@main
+    with:
+      kind: app
+      id: wonderlandos.rsh
+      makedepends: ruby ruby-rake bison pcre2

@@ -1,2 +1,5 @@
 build/
 build_config.rb.lock
+/dist/
+/.hubtools/
+/.hubcheck/
