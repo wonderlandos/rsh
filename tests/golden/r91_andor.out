@@ -1,0 +1,15 @@
+3
+["pushed"]
+note: a method of the file
+note: with parentheses
+puts with parentheses
+puts as Ruby's puts (it was the program puts, 127)
+a Capitalised receiver
+note: self.name
+the escape hatch forces a command
+a plain word is still a command
+NAME=value cmd: env-prefix
+a path is a command: 127
+=x
+1
+status: 0

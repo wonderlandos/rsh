@@ -35,6 +35,9 @@ bool wants_shell_layer(const std::string& file, const std::string& src);
 bool rt_prompt(mrb_state* mrb, std::string& out);
 
 std::string read_file(const std::string& path, bool& ok);
+// The folder require_relative and a written-out `source` path are read from: that of the script's
+// real path (links resolved); "." for -c, standard input and (rsh eval).
+std::string script_dir(const std::string& file);
 
 // A Regexp subject for the engine: 2 ASCII only, 1 valid UTF-8, -1 not valid UTF-8 (the engine's
 // rules; a subject called valid is matched without the engine's own check).

@@ -58,7 +58,10 @@ struct Shell {
     pid_t pgid = 0;
     int tty = -1;
     std::vector<std::string> dirstack;
-    std::string start_dir;  // the current folder when rsh started (a script's relative name is from there)
+    std::string start_dir;
+    // How the script handles SIGINT (0.9.1, audit H1/H2): 0 rsh's own (ends with 130), 1 ignored,
+    // 2 a trap block. Set by trap (src/main.cpp).
+    volatile int int_mode = 0;  // the current folder when rsh started (a script's relative name is from there)
 };
 Shell& shell();
 

@@ -42,7 +42,8 @@ The rule reads only the text, never `PATH` or the machine. Tests: `golden/classi
 
 **S1.4 Methods the reader sees**, anywhere in the file or in a `require_relative "<literal>"` file or
 a `source <literal path>` file (relative to the script's own folder, when read and when run, never the
-current folder; only a plain file; for `-c` and standard input the current folder; a path
+current folder; the script's real path, links resolved, as Ruby does for `require_relative`; only a
+plain file; for `-c` and standard input the current folder; a path
 with `#{}`, `$`, `~` or a pattern is known only at run time):
 `def name` (also `def self.name`, `private def name`); a literal name after `define_method`,
 `define_singleton_method`, `alias_method`, `alias`, `attr_reader`, `attr_accessor`, `attr_writer`,
@@ -98,14 +99,21 @@ the order written; `> #{path}` takes one word. `<<EOF` and `<<~EOF` take `#{}` (
 `golden/redirects.rsh`, `golden/heredoc.rsh`, `golden/r9_spec.rsh` (S2.7). A file that cannot be opened
 is a failed command, status 1 (S3).
 
-**S2.8 Lists.** `a && b`, `a || b`, `a ; b`, `a &` (background). After `&&` or `||` the next word is a
-command again, except the Ruby words `exit raise abort return break next` and `:`, which end the
-command line (`cmd || exit 1`). `\` at the end of a line continues it. Tests: `golden/lists.rsh`,
-`golden/r2_exit_after_or.rsh`, `golden/r9_spec.rsh` (S2.8).
+**S2.8 Lists.** `a && b`, `a || b`, `a ; b`, `a &` (background). After `&&` or `||` the next word is
+read by the same rules as at the start of a statement (S1.3 rules 2-5, S1.4, S1.5; 0.9.1): a command,
+unless it is a local (`cmd && n += 1`), a method the file makes (`make && notify "done"`), a Ruby word
+(`cmd || puts "failed"`, `cmd || exit 1`, `cmd || true`), a Capitalised name (`cmd && STDOUT.puts x`;
+`NAME=value cmd` stays a command), a keyword value (`true false nil self`), followed by `.`, `(`, `[`,
+`::`, `,` or an assignment, or `:`. Then the rest of the statement is Ruby. `$ cmd` forces a command, a
+path is a command. `\` at the end of a line continues it. Tests: `golden/lists.rsh`,
+`golden/r2_exit_after_or.rsh`, `golden/r9_spec.rsh` (S2.8), `golden/r91_andor.rsh`.
 
 **S2.9 Captures.** `` `cmd args` `` and `%x{...}` use the same reader (never `/bin/sh`) and give the
-output as a String; `$?` is set. A capture built at run time is an error. Tests: `golden/basics.rsh`,
-`golden/r9_spec.rsh` (S2.9), `golden/sec_c2_no_shell.rsh`.
+output as a String; `$?` is set. A capture whose command fails is a failed command like any other
+(S3): it raises `Rsh::Failed` outside a condition and unless `relaxed!` (decided in 0.9.1; then it gives
+its output and `$?` says how it failed). A capture built at run time is an error. Tests:
+`golden/basics.rsh`, `golden/r9_spec.rsh` (S2.9), `golden/sec_c2_no_shell.rsh`, `golden/r91_audit.rsh`
+(M2).
 
 **S2.10 A command line is a value**: `true` or `false` by its status (`ok = (git diff --quiet)`).
 Tests: `golden/r9_spec.rsh` (S2.10), `golden/pipes.rsh`.
@@ -133,8 +141,10 @@ formats".
 (printed), `cd dir do ... end` comes back afterwards. `export NAME=value` sets the environment; `export
 NAME` keeps a set NAME and is a mistake for one that is not set. `unset` checks the name. `umask` takes
 octal digits. `exec prog` replaces rsh (with only redirects it applies them to rsh). `source FILE WORDS`
-runs FILE in this process with ARGV = WORDS while it runs. `wait` waits for background jobs (`wait PID` for the job
-of that process, `wait %N` for job N, a plain number a pid first, else a job number; a job that is not there is 127). `Rsh.last_pid` is the pid of the
+runs FILE in this process with ARGV = WORDS while it runs; a FILE that is a folder, a device or a
+FIFO is a mistake (status 1). `cd -- DIR` is `cd DIR`. `wait` waits for background jobs (`wait PID` for the job
+of that process, `wait %N` for job N, a plain number a pid first, else a job number; a bare `wait`
+waits for every job and fails with the first job, in start order, that failed; a job that is not there is 127). `Rsh.last_pid` is the pid of the
 last `cmd &` in Ruby, `nil` before the first. `echo`, `pwd` and `type` alone on a line run without a fork;
 a failed write is `rsh: NAME: write error: ...`, status 1. `fg` and `bg` need the interactive shell.
 `system("prog", "arg")` and `Rsh.run("prog", "arg")` take separate arguments, never one string. Tests:
@@ -155,9 +165,15 @@ the `-h` text are frozen (`docs/STABILITY.md` section 3). Tests: contract "3. Fl
 **S5.3 Signals.** `trap`, `Signal.trap`, `at_exit`, `trap("EXIT")`. TERM, HUP and INT are acted on at
 the next safe point (a command line, an iteration of `loop`, the end of `sleep`): a trap block runs, or
 `SignalException`/`Interrupt` is raised so `ensure` and `at_exit` run, and rsh ends by that signal. TERM
-or HUP while a foreground command runs is passed to it. Code with no safe point is ended after 2 seconds.
-A signal ignored by the parent stays ignored. Tests: `golden/r2_signals.rsh`, `golden/r2_sigexc.rsh`,
-cli "H-2" cases.
+or HUP while a foreground command runs is passed to it, and so is INT when the script has no INT trap
+(INT sent to rsh alone, as `kill -INT` or `timeout -s INT` do; 0.9.1). When a command is ended by
+Ctrl-C (INT to the group): with no INT trap the script ends with 130; with `trap("INT") { }` the block
+runs at the next safe point; with `trap("INT", "IGNORE")` the script goes on; in both, the command's
+death by signal 2 is in `$?` and is not a failure that stops the script. A signal inside an `at_exit`
+block ends rsh by that signal after the other blocks ran (143, 130). Code with no safe point is ended
+after 2 seconds. A signal ignored by the parent stays ignored. Tests: `golden/r2_signals.rsh`,
+`golden/r2_sigexc.rsh`, cli "H-2" cases, `tests/signals.rb` (INT to rsh alone and to the group, with
+and without a trap, inside `at_exit`).
 
 **S5.4 Messages**: one line on standard error starting `rsh: `, with `FILE:LINE:` when there is a place
 (`docs/STABILITY.md` section 5). Tests: contract "5. Message formats" and "stdin script", cli "G1",
@@ -186,7 +202,9 @@ mkpath mkdir rmdir rm rm_f rm_r rm_rf rmtree cp cp_r mv ln_s touch chmod pwd`; o
 ArgumentError), `Find` (`find prune`), `Shellwords` (`escape split join shellescape shellsplit
 shellwords shelljoin`, with `String#shellescape`, `#shellsplit`, `Array#shelljoin`) and `Dir.mktmpdir`.
 They start no program and give Ruby values; `rm_rf` refuses `""`, `/`, `.`, `..` and what resolves to
-`/` or the current folder, `cp` refuses the same file, `cp_r` refuses a copy into itself, and a walk
-reports an unreadable folder and goes on; their meaning is `docs/rsh.md`, "Sh". The names are frozen:
+`/` or the current folder and walks from each folder's own descriptor (never through a link), `cp`
+refuses the same file and anything but a plain file and copies in pieces, `cp_r` refuses a copy into
+itself and skips a FIFO, socket or device with a notice, `mv` across file systems copies and removes,
+`FileUtils.mv` of several sources needs a folder, and a walk reports an unreadable folder and goes on; their meaning is `docs/rsh.md`, "Sh". The names are frozen:
 `tests/contract.sh` "STD_SHA". A command line keeps its meaning (`find . -name x` is the program). Tests:
 `golden/r9_sh.rsh` (each helper), `examples/doc_sh.rsh` (the documented example).

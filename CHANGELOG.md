@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.9.1
+
+### Audit 2
+
+The audit of v0.9.0 (0 Critical, 3 High, 12 Medium, 16 Low). Every fix has a test that fails on the
+v0.9.0 binary (built from the tag) and passes here; M10 is a documentation fix whose test passes on
+both.
+
+- **H1** INT sent to rsh alone while a command ran (`kill -INT`, `timeout -s INT`) was lost: the script
+  went on with status 0, `loop { sleep 0.02 }` could not be stopped, a `trap("INT")` block did not run.
+  INT now stays with rsh's handler while it waits; with no INT trap it is passed to the command and the
+  script ends with 130 (`ensure` and `at_exit` run). `tests/signals.rb` (new, in `make test`).
+- **H2** When Ctrl-C ended the command, rsh ended with 130 whatever the script said: now a
+  `trap("INT") { }` block runs and the script goes on, `trap("INT", "IGNORE")` goes on; the command's
+  signal stays in `$?` and does not raise. `tests/signals.rb`.
+- **H3** (decided) After `&&` and `||` the next word is read as at a statement start (S1.3 rules 2-5,
+  S1.4, S1.5): `cmd && n += 1`, `make && notify "done"`, `cmd && note("x")`, `cmd && STDOUT.puts x`,
+  `cmd || puts "x"` (Ruby's puts; it was the program, 127) and `cmd && $ echo x` work; `NAME=v cmd` and
+  a path stay commands. `cmd || true` is now Ruby's `true` (`$?` keeps the failed command's status).
+  `golden/r91_andor.rsh` (with `.explain`).
+- **M1** TERM or INT inside an `at_exit` block ends rsh by that signal (143, 130) after the other blocks
+  (it was `rsh: at_exit: SIGTERM (SignalException)`, 1, and INT was ignored). `tests/signals.rb`.
+- **M2** (decided) A failed capture raises `Rsh::Failed`, as before; now written in S2.9, docs/rsh.md
+  and rsh.1. `golden/r91_audit.rsh`.
+- **M3** (decided) A bare `wait` fails with the first job, in start order, that failed (it gave the last
+  job's status, so a failing first job was silent). `golden/r91_audit.rsh`.
+- **M4** `source DIR`, `source /dev/null`, a device or a FIFO: "Is a directory" / "not a plain file",
+  status 1 (it ran as an empty script). `golden/r91_audit.rsh`.
+- **M5** `require_relative` and a written-out `source` path go through the script's real path (a link
+  to a script looked next to the link). cli "A2-M5".
+- **M6** `Sh.cp` keeps the system's error with the destination's name (`Permission denied - ro/x`; it
+  was an empty RuntimeError). `golden/r91_audit.rsh`.
+- **M7** `Sh.cp` copies plain files only, in 64 KB pieces (not the whole file in memory); a FIFO or
+  device is ArgumentError (it blocked); `Sh.cp_r` skips a FIFO, socket or device with a notice (it hung).
+  `golden/r91_audit.rsh`.
+- **M8** `Sh.mv` across file systems copies (modes kept) and removes the source (it was EXDEV).
+  cli "A2-M8".
+- **M9** `Sh.rm_rf` walks with `openat(O_NOFOLLOW | O_DIRECTORY)` and `unlinkat` from each folder's own
+  descriptor (`Rsh.__rm_tree`, src/rt.cpp): a folder swapped for a link during the walk is never
+  followed. `golden/r91_audit.rsh` (a link inside the tree), `golden/r9_sh.rsh`.
+- **M10** STABILITY K3 corrected with measured limits: 125 nested `if` (126 fail), 62 nested `do`
+  blocks, recursion about 510 deep, one string literal about 65,530 bytes. cli "A2-M10".
+- **M11** `--lint` (and `-n`) warn about a line that starts with `#{...}` (a Ruby comment that runs
+  nothing). cli "A2-M11".
+- **M12** `FileUtils.mv` of several sources onto a file is ArgumentError (they replaced each other).
+  `golden/r91_audit.rsh`.
+- Lows fixed: **L3** with HOME unset `~/x` is `/x` (cli "A2-L3"); **L7** `-c` twice is status 2 (cli
+  "A2-L7"); **L8** `cd -- DIR`; **L9** `Sh.find` on a file is ENOTDIR, `maxdepth: 0` and an unclosed `{`
+  are ArgumentErrors that say so; **L10** `Dir.mktmpdir([prefix, suffix])`, `Sh.chmod` with a String is
+  an ArgumentError; **L14** goldens and `tests/signals.rb` for the spec rules that had none; **L15** by
+  H3; **L16** `Sh.cp` writes its temporary with `O_EXCL | O_NOFOLLOW` (all `golden/r91_audit.rsh`
+  unless named).
+- Lows left, documented (`docs/STABILITY.md` section 10): L1 `"$*"` inside a word, L2 `~nosuchuser`,
+  L4 two-digit descriptors and `>|`/`<&-`, L5 `exit` or a signal inside a `source`d file is reported as
+  "source exited N", L6 `$$` in Ruby is `nil` (use `Process.pid`), L11 the D1 open-failure message is
+  rsh's own and not silenced by `2>/dev/null`, L12 `-n` messages have no `rsh: ` by the contract
+  (section 5), L13 0.1.4 was never tagged (noted below).
+
 ## 0.9.0
 
 The release candidate for 1.0 (`docs/STABILITY.md`, sections 10-12): rsh as a script interpreter, as

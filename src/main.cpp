@@ -59,6 +59,7 @@ void finish(int s) {
     sigprocmask(SIG_UNBLOCK, &m, nullptr);
     raise(s);
 }
+bool interactive_session = false;
 void on_signal(int s) {
     if (s <= 0 || s >= N) return;
     if (s == SIGALRM && watch) {
@@ -77,6 +78,9 @@ void on_signal(int s) {
     // Waiting for a command: it gets TERM or HUP too, or the shell would sit until the 2-second
     // watchdog (the command is not in the shell's process group when it has job control).
     if ((s == SIGTERM || s == SIGHUP) && mode[s] == 0) forward_to_foreground(s);
+    // INT to rsh alone while a command runs (kill -INT, timeout -s INT): the command gets it too
+    // when the script has no INT trap, as Ctrl-C to the group would (0.9.1, audit H1)
+    if (s == SIGINT && mode[s] == 0 && !interactive_session) forward_to_foreground(s);
     if (!pend[s]) first_at = sig_atomic_t(now.tv_sec);
     pend[s] = 1;
     any = 1;
@@ -111,6 +115,7 @@ void install_script() {
         sigaction(s, &a, &old);
         if (old.sa_handler == SIG_IGN) {
             mode[s] = 1;
+            if (s == SIGINT) shell().int_mode = 1;
             sigaction(s, &old, nullptr);
         }
     }
@@ -128,7 +133,6 @@ void eval_end() {
     if (mode[SIGINT] != 2) set_disposition(SIGINT, SIG_IGN);
     pend[SIGINT] = 0;
 }
-bool interactive_session = false;
 
 mrb_value m_sigp(mrb_state*, mrb_value) { return mrb_bool_value(any != 0); }
 mrb_value m_sig_take(mrb_state*, mrb_value) {
@@ -155,6 +159,7 @@ mrb_value m_trap(mrb_state* mrb, mrb_value) {
     if (n <= 0 || n >= N || n == SIGKILL || n == SIGSTOP) return mrb_nil_value();
     int s = int(n);
     mode[s] = sig_atomic_t(m);
+    if (s == SIGINT) shell().int_mode = int(m);
     bool own = s == SIGTERM || s == SIGHUP || s == SIGINT;
     if (m == 1) set_disposition(s, SIG_IGN);
     else if (m == 2) handle(s);
@@ -185,6 +190,13 @@ mrb_value m_home_self(mrb_state* mrb, mrb_value) {
     return h.empty() ? mrb_nil_value() : mrb_str_new(mrb, h.data(), h.size());
 }
 mrb_value m_ppid(mrb_state*, mrb_value) { return mrb_fixnum_value(getppid()); }
+// Rsh.__died(n): the script ends by signal n (a signal inside at_exit, audit M1).
+mrb_value m_died(mrb_state* mrb, mrb_value) {
+    mrb_int n;
+    mrb_get_args(mrb, "i", &n);
+    if (n > 0 && n < N) died = int(n);
+    return mrb_nil_value();
+}
 // SystemExit#status and #success? (the built-in interpreter keeps the status but has no method).
 mrb_value m_exit_status(mrb_state* mrb, mrb_value self) {
     mrb_value v = mrb_iv_get(mrb, self, mrb_intern_lit(mrb, "status"));
@@ -248,6 +260,7 @@ void program_methods(mrb_state* mrb) {
     mrb_define_module_function(mrb, r, "__signal_exc", sig::m_signal_exc, MRB_ARGS_REQ(1));
     mrb_define_module_function(mrb, r, "__home_self", sig::m_home_self, MRB_ARGS_NONE());
     mrb_define_module_function(mrb, r, "__ppid", sig::m_ppid, MRB_ARGS_NONE());
+    mrb_define_module_function(mrb, r, "__died", sig::m_died, MRB_ARGS_REQ(1));
     RClass* se = mrb_class_get(mrb, "SystemExit");
     mrb_define_method(mrb, se, "status", sig::m_exit_status, MRB_ARGS_NONE());
     mrb_define_method(mrb, se, "success?", sig::m_exit_success, MRB_ARGS_NONE());
@@ -680,6 +693,10 @@ int main(int argc, char** argv) {
             break;
         }
         if (a.empty() || a[0] != '-' || a == "-") break;
+        if ((a == "-c" || a == "-e") && i + 1 < argc && have_code) {  // only the last ran (audit 2 L7)
+            std::fprintf(stderr, "rsh: -c (or -e) given twice: one text per run\n%s", USAGE);
+            return 2;
+        }
         if ((a == "-c" || a == "-e") && i + 1 < argc) code = argv[++i], have_code = true;
         else if (a == "-s") from_stdin = true;
         else if (a == "--name" && i + 1 < argc) name = argv[++i];
@@ -750,7 +767,8 @@ int main(int argc, char** argv) {
         Result r;
         if (shell) {
             size_t slash = file.rfind('/');
-            collect_defs(src, slash == std::string::npos ? "." : file.substr(0, slash), k.methods);
+            (void)slash;
+            collect_defs(src, script_dir(file), k.methods);
             r = transpile(src, file, k);
         } else r.ruby = src;
         for (auto& d : r.diags)

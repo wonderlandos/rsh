@@ -216,6 +216,9 @@ bool expand(const Word& w, const std::vector<Value>& vals, Host& h, std::vector<
                             err = "no such user: " + user;
                             return false;
                         }
+                        // a home of "/" (HOME unset) and ~/x is /x, not //x (0.9.1, audit 2 L3)
+                        if (home.size() > 1 && home.back() == '/') home.pop_back();
+                        if (home == "/" && e != std::string::npos) home.clear();
                         pat += glob_escape(home);
                         s = e == std::string::npos ? "" : s.substr(e);
                     }
@@ -658,10 +661,16 @@ static void source_path(const Item& it, std::string& path) {
     }
     const std::string& f = current_line->file;
     if (f.empty() || f[0] == '(' || f == "-" || f == "-c") return;
-    size_t slash = f.rfind('/');
-    std::string dir = slash == std::string::npos ? "" : slash == 0 ? "/" : f.substr(0, slash + 1);
-    if (dir.empty() || dir[0] != '/') dir = shell().start_dir + "/" + dir;  // the folder rsh started in
-    path = dir + path;
+    // the script's real path, links resolved (audit 2 M5); a relative name is from the folder rsh
+    // started in
+    std::string full = f[0] == '/' ? f : shell().start_dir + "/" + f;
+    char* r = realpath(full.c_str(), nullptr);
+    if (r) {
+        full = r;
+        free(r);
+    }
+    size_t slash = full.rfind('/');
+    path = (slash == 0 ? std::string("/") : full.substr(0, slash + 1)) + path;
 }
 
 // Runs one pipeline in the foreground (or starts it in the background).
@@ -794,10 +803,11 @@ bool pipeline(const Item& it, const std::vector<Value>& vals, Host& h, const Opt
     bool ignore_int = !shell().interactive;
     struct sigaction ign {}, old_int {}, old_quit {};
     ign.sa_handler = SIG_IGN;
-    if (ignore_int) {
-        sigaction(SIGINT, &ign, &old_int);
-        sigaction(SIGQUIT, &ign, &old_quit);
-    }
+    // QUIT is the command's alone. INT stays with rsh's handler (0.9.1, audit H1): it was ignored
+    // here, so an INT sent to rsh alone while a command ran was lost; now it is noted, passed on to
+    // the command when the script has no INT trap, and acted on when the command ends.
+    if (ignore_int) sigaction(SIGQUIT, &ign, &old_quit);
+    (void)old_int;
     std::string partial;
     bool stage_failed = false;
     auto feed = [&](const std::string& ln) {
@@ -874,12 +884,11 @@ bool pipeline(const Item& it, const std::vector<Value>& vals, Host& h, const Opt
         s.status = wait_pid(s.pid, &s.sig, &stopped);
         if (k < size_t(MAX_FG)) fg_pids[k] = 0;
         if (stopped) pr.stopped = true;
-        if (s.sig == SIGINT) pr.interrupted = true;
+        // Ctrl-C ended the command: the script ends with 130 only when it does not handle INT
+        // itself (a trap block runs at the next safe point; IGNORE goes on), audit H2
+        if (s.sig == SIGINT && (shell().interactive || shell().int_mode == 0)) pr.interrupted = true;
     }
-    if (ignore_int) {
-        sigaction(SIGINT, &old_int, nullptr);
-        sigaction(SIGQUIT, &old_quit, nullptr);
-    }
+    if (ignore_int) sigaction(SIGQUIT, &old_quit, nullptr);
     if (shell().job_control) give_terminal(shell().pgid);
     if (pr.stopped) {
         Job j;
@@ -995,7 +1004,10 @@ static Outcome run_line(const Line& L, const std::vector<Value>& vals, Host& h, 
     oc.code = last;
     shell().last_status = last;
     bool final_item = last_item == int(L.items.size()) - 1 && L.items.back().op != Op::Bg;
-    if (last != 0 && final_item && !o.cond && !o.relaxed && !shell().interactive && fail_stage >= 0) {
+    // A command ended by Ctrl-C while the script traps or ignores INT is not a failure that stops the
+    // script: the trap decides, or the script goes on (audit H2); $? still says signal 2.
+    bool int_kept = fail_stage >= 0 && fail_stages[size_t(fail_stage)].sig == SIGINT && shell().int_mode != 0;
+    if (last != 0 && final_item && !o.cond && !o.relaxed && !shell().interactive && fail_stage >= 0 && !int_kept) {
         oc.raise = true;
         oc.failed_argv = fail_stages[size_t(fail_stage)].argv;
         oc.tail = fail_stages[size_t(fail_stage)].tail;
@@ -1169,6 +1181,16 @@ static int emit(const char* who, const std::string& s) {
 int run_builtin(const std::vector<std::string>& a, Host& h, const Env& env) {
     const std::string& n = a[0];
     if (n == "cd") {
+        if (a.size() > 1 && a[1] == "--") {  // cd -- DIR, as sh (0.9.1, audit 2 L8)
+            std::vector<std::string> b(a.begin() + 2, a.end());
+            b.insert(b.begin(), "cd");
+            if (b.size() == 1) return cd_to(home_of(""));
+            if (b.size() > 2) {
+                complain("cd: one folder at a time");
+                return 2;
+            }
+            return cd_to(b[1]);
+        }
         if (a.size() > 2) {
             complain("cd: one folder at a time");
             return 2;
@@ -1405,7 +1427,12 @@ int run_builtin(const std::vector<std::string>& a, Host& h, const Env& env) {
             }
             code = wait_job(*j);
         } else
-            for (auto& j : jobs) code = wait_job(j);
+            // every job; the status is that of the first job (in start order) that failed, so a
+            // failing job is never hidden by a later one that worked (0.9.1, audit 2 M3)
+            for (auto& j : jobs) {
+                int c = wait_job(j);
+                if (c && !code) code = c;
+            }
         jobs.erase(std::remove_if(jobs.begin(), jobs.end(), [](const Job& x) { return x.done; }), jobs.end());
         return code;
     }

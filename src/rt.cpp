@@ -18,6 +18,7 @@
 #include <mruby/variable.h>
 #include <mruby/io.h>
 #include <pcre2.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/stat.h>
@@ -357,6 +358,108 @@ mrb_value m_touch(mrb_state* mrb, mrb_value) {
     return mrb_nil_value();
 }
 
+// Rsh.__copy_file(src, tmp) (0.9.1, audit 2 M6, M7, L16; Sh.cp): copies a plain file in 64 KB
+// pieces into a new file `tmp` (O_EXCL, never through a link, 0600 until done, then src's mode).
+// A source that is not a plain file (a FIFO, a device, a folder) is ArgumentError; an error is the
+// system's (Errno), and tmp is removed.
+mrb_value m_copy_file(mrb_state* mrb, mrb_value) {
+    // no C++ object lives across a raise here (it is a longjmp): plain C strings only
+    mrb_value srcv, tmpv;
+    mrb_get_args(mrb, "SS", &srcv, &tmpv);
+    const char* src = mrb_string_cstr(mrb, srcv);
+    const char* tmp = mrb_string_cstr(mrb, tmpv);
+    int in = open(src, O_RDONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
+    if (in < 0) mrb_sys_fail(mrb, src);
+    struct stat st;
+    if (fstat(in, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(in);
+        mrb_raisef(mrb, E_ARGUMENT_ERROR, "cp: %s is not a plain file (a folder, FIFO or device); cp copies files", src);
+    }
+    int out = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (out < 0) {
+        int e = errno;
+        close(in);
+        errno = e;
+        mrb_sys_fail(mrb, tmp);
+    }
+    static char buf[65536];
+    int err = 0;
+    const char* where = src;
+    for (;;) {
+        ssize_t n = read(in, buf, sizeof buf);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) {
+            err = errno;
+            break;
+        }
+        if (n == 0) break;
+        for (ssize_t o = 0; o < n && !err;) {
+            ssize_t w = write(out, buf + o, size_t(n - o));
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) err = w < 0 ? errno : EIO, where = tmp;
+            else o += w;
+        }
+        if (err) break;
+    }
+    if (!err && fchmod(out, st.st_mode & 07777) != 0) err = errno, where = tmp;
+    if (close(out) != 0 && !err) err = errno, where = tmp;
+    close(in);
+    if (err) {
+        unlink(tmp);
+        errno = err;
+        mrb_sys_fail(mrb, where);
+    }
+    return mrb_nil_value();
+}
+
+// Rsh.__rm_tree(path) (0.9.1, audit 2 M9; Sh.rm_rf): removes a file, a link or a folder and all
+// below it, walking with openat(O_NOFOLLOW | O_DIRECTORY) and unlinkat from the folder's own
+// descriptor, so a folder swapped for a link while the walk runs is never followed. A missing path
+// is fine. Errors: the first one, as Errno, after removing what can be removed.
+static int rm_at(int at, const char* name, std::string& bad) {
+    struct stat st;
+    if (fstatat(at, name, &st, AT_SYMLINK_NOFOLLOW) != 0) return errno == ENOENT ? 0 : (bad = name, errno);
+    if (!S_ISDIR(st.st_mode)) return unlinkat(at, name, 0) == 0 || errno == ENOENT ? 0 : (bad = name, errno);
+    int fd = openat(at, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return bad = name, errno;
+    DIR* d = fdopendir(fd);
+    if (!d) {
+        int e = errno;
+        close(fd);
+        return bad = name, e;
+    }
+    int first = 0;
+    std::vector<std::string> names;
+    while (dirent* e = readdir(d))
+        if (std::strcmp(e->d_name, ".") && std::strcmp(e->d_name, "..")) names.push_back(e->d_name);
+    for (auto& c : names) {
+        std::string inner;
+        int r = rm_at(dirfd(d), c.c_str(), inner);
+        if (r && !first) first = r, bad = std::string(name) + "/" + inner;
+    }
+    closedir(d);
+    if (unlinkat(at, name, AT_REMOVEDIR) != 0 && errno != ENOENT && !first) first = errno, bad = name;
+    return first;
+}
+mrb_value m_rm_tree(mrb_state* mrb, mrb_value) {
+    mrb_value pv;
+    mrb_get_args(mrb, "S", &pv);
+    const char* p = mrb_string_cstr(mrb, pv);
+    int r;
+    char where[4096];
+    {  // the C++ objects end here, before any raise (a longjmp)
+        std::string bad;
+        r = rm_at(AT_FDCWD, p, bad);
+        std::string full = bad.compare(0, std::strlen(p), p) == 0 ? bad : std::string(p) + "/" + bad;
+        std::snprintf(where, sizeof where, "%s", full.c_str());
+    }
+    if (r) {
+        errno = r;
+        mrb_sys_fail(mrb, where);
+    }
+    return mrb_nil_value();
+}
+
 // Rsh.last_pid (0.9.0, D2): the process id of the last `cmd &`, nil before the first (Ruby's $! is
 // its exception variable; `$!` in a command line is the same number).
 mrb_value m_last_pid(mrb_state* mrb, mrb_value) {
@@ -417,6 +520,20 @@ std::string dir_of(const std::string& f) {
     return s == std::string::npos ? "." : s == 0 ? "/" : f.substr(0, s);
 }
 
+// The folder of a script for require_relative and a written-out source path: that of its real
+// path, links resolved, as Ruby does (0.9.1, audit 2 M5: `ln -s sub/main.rsh ~/bin/tool` looked
+// next to the link). A name that is not a file (-c, -, (rsh eval)) is the current folder.
+}  // namespace
+std::string script_dir(const std::string& f) {
+    if (f.empty() || f == "-" || f == "-c" || f[0] == '(') return ".";
+    char* r = realpath(f.c_str(), nullptr);
+    if (!r) return dir_of(f);
+    std::string d = dir_of(r);
+    free(r);
+    return d;
+}
+namespace {
+
 bool ends_with(const std::string& s, const char* t) {
     size_t n = std::strlen(t);
     return s.size() >= n && s.compare(s.size() - n, n, t) == 0;
@@ -456,7 +573,7 @@ void load_text(mrb_state* mrb, const std::string& src, const std::string& file, 
     {
         Known k;
         if (rsh_syntax) {
-            collect_defs(src, dir_of(file), k.methods);
+            collect_defs(src, script_dir(file), k.methods);
             Result r = transpile(src, file, k);
             script_methods().insert(k.methods.begin(), k.methods.end());
             if (!r.ok()) {
@@ -486,7 +603,7 @@ mrb_value m_require(mrb_state* mrb, mrb_value) {
     mrb_value path = mrb_nil_value(), src = mrb_nil_value();
     bool once = relative;
     {
-        std::string base = relative && !host.files.empty() ? dir_of(host.files.back()) : ".";
+        std::string base = relative && !host.files.empty() ? script_dir(host.files.back()) : ".";
         std::string r = rel;
         std::string found;
         for (const char* ext : {"", ".rsh", ".rb"}) {
@@ -629,6 +746,13 @@ int RtHost::source(const std::vector<std::string>& a) {
     if (a.size() < 2) {
         std::fprintf(stderr, "rsh: source needs a file\n");
         return 2;
+    }
+    // only a plain file, as the read-ahead (0.9.1, audit 2 M4): a folder, /dev/null or a FIFO is
+    // a mistake, not an empty script
+    struct stat sb;
+    if (stat(a[1].c_str(), &sb) == 0 && !S_ISREG(sb.st_mode)) {
+        std::fprintf(stderr, "rsh: source: %s: %s\n", a[1].c_str(), S_ISDIR(sb.st_mode) ? "Is a directory" : "not a plain file");
+        return 1;
     }
     bool ok;
     std::string body = read_file(a[1], ok);
@@ -1825,6 +1949,8 @@ mrb_state* rt_open(const std::string& script, const std::vector<std::string>& ar
     mrb_define_module_function(mrb, r, "__stat", m_stat, MRB_ARGS_REQ(2));
     mrb_define_module_function(mrb, r, "last_pid", m_last_pid, MRB_ARGS_NONE());
     mrb_define_module_function(mrb, r, "__touch", m_touch, MRB_ARGS_REQ(1));
+    mrb_define_module_function(mrb, r, "__copy_file", m_copy_file, MRB_ARGS_REQ(2));
+    mrb_define_module_function(mrb, r, "__rm_tree", m_rm_tree, MRB_ARGS_REQ(1));
     RClass* proc_mod = mrb_define_module(mrb, "Process");
     mrb_define_module_function(mrb, proc_mod, "uid", m_uid, MRB_ARGS_NONE());
     mrb_define_module_function(mrb, proc_mod, "euid", m_euid, MRB_ARGS_NONE());
@@ -1982,7 +2108,7 @@ int rt_check(mrb_state* mrb, const std::string& src, const std::string& file, bo
     Known k;
     Result r;
     if (rsh_syntax) {
-        collect_defs(src, dir_of(file), k.methods);
+        collect_defs(src, script_dir(file), k.methods);
         r = transpile(src, file, k);
     } else r.ruby = src;
     for (auto& d : r.diags) {

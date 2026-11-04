@@ -172,7 +172,23 @@ Sets a variable for that one command.
 A back-quoted text (or
 .BR %x{} )
 runs a command line and gives its output as a String; its status is in
-.BR $? .
+.BR $? ;
+one whose command fails raises
+.B Rsh::Failed
+like any failed command (outside a condition, unless
+.BR relaxed! ).
+After
+.B &&
+or
+.B ||
+the next word is read as at the start of a statement: a local, a method of the file, a Ruby word
+such as
+.BR puts ,
+or a Capitalised name makes the rest Ruby
+.RB ( "make && notify \(dqdone\(dq" ,
+.BR "cmd || puts \(dqfailed\(dq" );
+.B "$ cmd"
+forces a command.
 In a command line,
 .B $?
 is the status of the part that ran last

@@ -253,6 +253,31 @@ if [ "$(id -u)" != 0 ]; then
 fi
 mkfifo "$tmp/cli/fifo" 2>/dev/null && printf 'source fifo\nputs 1\n' >"$tmp/cli/src_fifo.rsh" &&
 	cli "D3: the read-ahead never opens a FIFO (rsh -n would hang)" 'timeout 5 "$rsh" -n "$tmp/cli/src_fifo.rsh" 2>/dev/null'
+# 0.9.1, audit 2 of v0.9.0 (CHANGELOG "Audit 2"): the cases a golden cannot hold.
+mkdir -p "$tmp/cli/m5/sub" "$tmp/cli/m5/bin"
+printf 'def hh = puts("hh")\n' >"$tmp/cli/m5/sub/lib.rsh"
+printf 'require_relative "lib"\nhh\nsource lib.rsh\nhh\n' >"$tmp/cli/m5/sub/main.rsh"
+ln -sf ../sub/main.rsh "$tmp/cli/m5/bin/tool"
+cli "A2-M5: require_relative and a written-out source go through the script's real path (a link to it)" \
+	'[ "$(cd "$tmp/cli" && "$rsh" m5/bin/tool 2>&1)" = "$(printf "hh\nhh")" ]'
+printf 'x = "echo"\n#{x} hi\n' >"$tmp/cli/m11.rsh"
+cli "A2-M11: --lint warns about a line that starts with #{...} (a Ruby comment)" \
+	'"$rsh" --lint "$tmp/cli/m11.rsh" 2>&1 | grep -q "m11.rsh:2: warning: a line that starts with #{...} is a Ruby comment"'
+cli "A2-L7: -c given twice is a mistake (status 2), not the last one alone" \
+	'"$rsh" -c "echo 1" -c "echo 2" >/dev/null 2>&1; [ $? = 2 ]'
+cli "A2-L3: with HOME unset ~/x is /x" '[ "$(env -u HOME "$rsh" -c "\$ printf %s ~/x")" = /x ]'
+# M10: the limits STABILITY K3 states, measured: 125 nested ifs work, 126 are "too complex"
+awk 'BEGIN { for (i = 0; i < 125; i++) print "if true"; print "echo deep"; for (i = 0; i < 125; i++) print "end" }' >"$tmp/cli/nest125.rsh"
+awk 'BEGIN { for (i = 0; i < 126; i++) print "if true"; print "echo deep"; for (i = 0; i < 126; i++) print "end" }' >"$tmp/cli/nest126.rsh"
+cli "A2-M10: 125 nested if work, 126 are the interpreter's limit (STABILITY K3)" \
+	'[ "$("$rsh" "$tmp/cli/nest125.rsh" 2>&1)" = deep ] && ! "$rsh" "$tmp/cli/nest126.rsh" >/dev/null 2>&1'
+# M8: across file systems (when /dev/shm is another one) Sh.mv copies and removes
+if [ -d /dev/shm ] && [ -w /dev/shm ] && [ "$(stat -c %d /dev/shm)" != "$(stat -c %d "$tmp")" ]; then
+	printf x >"$tmp/cli/mvsrc"
+	mkdir -p "$tmp/cli/mvdir/in" && printf y >"$tmp/cli/mvdir/in/f"
+	cli "A2-M8: Sh.mv across file systems: a file and a folder" \
+		'(cd "$tmp/cli" && TMPDIR=/dev/shm "$rsh" -c "d = Sh.tmpdir; Sh.mv(\"mvsrc\", d); Sh.mv(\"mvdir\", d); p [File.read(\"#{d}/mvsrc\"), File.read(\"#{d}/mvdir/in/f\"), File.exist?(\"mvsrc\"), File.exist?(\"mvdir\")]; Sh.rm_rf(d)" 2>&1 | grep -qx "\[\"x\", \"y\", false, false\]")'
+fi
 # M1: a long interactive session does not grow (an arena slot and a string per input, the command
 # lines of every input kept: about 250 and 600 bytes a line). 20,000 inputs through -i, RSS after
 # 2,000 and after 20,000; under 1 MB of growth (0.1.4: about 7 MB; 0.9.0: about 0.3 MB).

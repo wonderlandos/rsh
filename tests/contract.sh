@@ -32,8 +32,9 @@ EXPLAIN_SHA=926c120c89eb747ea34d65027d122a628869a3d784512c5e04681c3f69f55fee
 WORDS_SHA=06f3f08a2192c35b08799e82141a30efb8198a9e03227c84f15e2a8d62a2d76a
 BUILTINS_SHA=76e3078a9e447355f0e2f4cd969b5e2939a4f548e9e74b3c9b042285ad16e166
 BUILD_SHA=1b2c61f0bdeb43241be9020716011ec8d7293d49dd15f805c7009fcb4de1ef6a
-# 0.9.0: the names of the built-in Sh, FileUtils, Find and Shellwords (docs/design.md S8).
-STD_SHA=484b24ed31efebaf034d597878d3ed46d2d74dfe912513ff996a68baeae5177a
+# 0.9.0: the names of the built-in Sh, FileUtils, Find and Shellwords (docs/design.md S8). Printed again
+# in 0.9.1: Sh.tmpdir gained an optional suffix (for Dir.mktmpdir([prefix, suffix]), audit 2 L10).
+STD_SHA=f1f281a1839ebad532fb90f0648c539320b2e1edd6950cc86da0e6eb4de3e9e5
 
 ok() { # label condition...
 	label=$1

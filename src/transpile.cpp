@@ -534,6 +534,19 @@ struct CmdParser {
     // words; never programs that matter) or a lone `:` (sh's no-op).
     bool ruby_tail(bool is_or) {
         if (capture || i >= lim) return false;
+        while (i < lim && blank(s[i])) ++i;
+        if (i >= lim) return false;
+        // `cmd && $ echo x`: the escape hatch forces a command here too (0.9.1, audit H3)
+        if (s[i] == '$' && i + 1 < lim && blank(s[i + 1])) {
+            i += 2;
+            while (i < lim && blank(s[i])) ++i;
+            return false;
+        }
+        if (ruby_word_here()) {
+            tail = i;
+            tail_or = is_or;
+            return true;
+        }
         size_t e = i;
         if (s[i] == ':') {
             e = i + 1;
@@ -551,6 +564,36 @@ struct CmdParser {
         tail = tail_colon ? e : i;
         tail_or = is_or;
         return true;
+    }
+    // After && or ||, the word is Ruby by the same rules as at the start of a statement (S1.3 rules
+    // 2-5, S1.4, S1.5; 0.9.1, the CTO's decision on audit 2 H3): a local, a method the file makes,
+    // a Ruby word, a Capitalised name (not NAME=value cmd), a keyword value, or a word with `.`, `(`,
+    // `[`, `::`, `,` or an assignment after it. A path is a command, as at a statement start.
+    bool ruby_word_here() const {
+        if (!ident_start(s[i])) return false;
+        size_t j = i;
+        while (j < lim && ident_char(s[j])) ++j;
+        std::string w = s.substr(i, j - i);
+        if (j < lim && (s[j] == '?' || s[j] == '!') && !(j + 1 < lim && s[j + 1] == '=')) ++j;
+        if (std::isupper((unsigned char)w[0])) {
+            // NAME=value cmd stays a command line, as at a statement start
+            return !(j < lim && s[j] == '=' && j + 1 < lim && !std::strchr("=~", s[j + 1]));
+        }
+        for (const char* k : {"true", "false", "nil", "self", "not", "defined", "yield", "super"})
+            if (w == k) return true;
+        if (is_keyword(w)) return false;  // then, do, end, else ...: as before
+        if (known.locals.count(w) || known.methods.count(w) || is_ruby_word(w)) return true;
+        if (j < lim && std::strchr(".([,", s[j])) return true;
+        if (j + 1 < lim && s[j] == ':' && s[j + 1] == ':') return true;
+        // an assignment: n=1, n = 1, n += 1, n ||= 1 (not == or =~; `echo =x` stays a command)
+        size_t k = j;
+        while (k < lim && blank(s[k])) ++k;
+        size_t a = k;
+        while (a < lim && a - k < 3 && std::strchr("+-*/|&<>%", s[a])) ++a;
+        if (a >= lim || s[a] != '=' || (a + 1 < lim && (s[a + 1] == '=' || s[a + 1] == '~'))) return false;
+        if (a == j) return true;                          // glued: n=1
+        return a + 1 >= lim || blank(s[a + 1]) || a > k;  // spaced: n = 1; an operator: n += 1, n +=1
+
     }
     // Here-document bodies: the lines after this one, up to each end word.
     bool bodies(Line& L) {
@@ -1162,6 +1205,9 @@ struct Tx {
                 prev = Start;
                 continue;
             }
+            // `#{x} hi` at a statement start is a Ruby comment: nothing runs (0.9.1, audit 2 M11)
+            if (stmt && !interp && c == '#' && i + 1 < n && s[i + 1] == '{')
+                warning(line, "a line that starts with #{...} is a Ruby comment and runs nothing; to run the value as a command write $ #{...}");
             if ((stmt || cond) && !interp && (sh_hint() || try_command())) {
                 cond = false;
                 continue;

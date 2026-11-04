@@ -113,6 +113,7 @@ test: $(OUT)/unit $(OUT)/unit_regexp $(OUT)/rsh
 	sh tests/contract.sh $(OUT)/rsh
 	sh tests/doctrine.sh $(OUT)/rsh
 	@if command -v ruby >/dev/null; then ruby tests/interactive.rb $(OUT)/rsh; else echo 'interactive: ruby missing, skipped'; fi
+	@if command -v ruby >/dev/null; then ruby tests/signals.rb $(OUT)/rsh; else echo 'signals: ruby missing, skipped'; fi
 	sh bench/run.sh --gate $(OUT)/rsh
 ifeq ($(SANITIZE),1)
 	$(MAKE) --no-print-directory asan

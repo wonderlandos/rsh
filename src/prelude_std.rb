@@ -45,6 +45,7 @@ module Sh
       end
       i += 1
     end
+    raise ArgumentError, "find: the pattern #{pat.inspect} has a { without its }" if depth > 0
     Regexp.new("\\A#{out}\\z")
   end
 
@@ -77,7 +78,8 @@ module Sh
   # hidden: true) -> Array of paths below dir, sorted, each "dir/..."; links are not followed.
   def find(dir = ".", name: nil, type: nil, older: nil, newer: nil, maxdepth: nil, hidden: true)
     raise ArgumentError, "find: type is :file, :dir or :link" unless [nil, :file, :dir, :link].include?(type)
-    raise __errno(Errno::ENOENT, dir) unless File.directory?(dir.to_s)
+    raise __errno(File.exist?(dir.to_s) ? Errno::ENOTDIR : Errno::ENOENT, dir) unless File.directory?(dir.to_s)
+    raise ArgumentError, "find: maxdepth is 1 or more (1: the entries of dir; dir itself is never listed)" if maxdepth && maxdepth < 1
     re = name && __name_re(name.to_s)
     old_s = older && __seconds(older, "older")
     new_s = newer && __seconds(newer, "newer")
@@ -178,19 +180,9 @@ module Sh
     nil
   end
 
-  def __rm_tree(p)
-    st = begin
-      File.lstat(p)
-    rescue SystemCallError
-      return
-    end
-    if st.directory?
-      Dir.children(p).each { |c| __rm_tree(File.join(p, c)) }
-      Dir.rmdir(p)
-    else
-      File.delete(p)
-    end
-  end
+  # fd-relative (openat, unlinkat, O_NOFOLLOW) in src/rt.cpp: a folder swapped for a link during the
+  # walk is never followed (0.9.1, audit 2 M9)
+  def __rm_tree(p) = Rsh.__rm_tree(p)
 
   # cp(src, dst): one file (into dst when dst is a folder), with its mode. Returns the new path.
   def cp(src, dst)
@@ -204,15 +196,29 @@ module Sh
       raise ArgumentError, "cp: #{src} and #{dst} are the same file" if d.dev == s.dev && d.ino == s.ino
       dst = File.realpath(dst) if File.symlink?(dst)  # as cp: write where the link points
     end
-    # into a new file next to dst, then renamed over it: dst is whole or untouched (0.9.0 review)
-    tmp = File.join(File.dirname(dst), ".#{File.basename(dst)}.rsh-#{Process.pid}-#{rand(1 << 30).to_s(36)}")
+    raise ArgumentError, "cp: #{src} is not a plain file (a FIFO or device); cp copies files" unless s.file?
+    # into a new file next to dst (made with O_EXCL, never through a link, copied in pieces: 0.9.1,
+    # audit 2 M7, L16), then renamed over it: dst is whole or untouched (0.9.0 review)
+    tmp = nil
+    10.times do
+      cand = File.join(File.dirname(dst), ".#{File.basename(dst)}.rsh-#{Process.pid}-#{rand(1 << 30).to_s(36)}")
+      begin
+        Rsh.__copy_file(src, cand)
+        tmp = cand
+        break
+      rescue Errno::EEXIST
+        next
+      rescue SystemCallError => e
+        # an error on the temporary is said with the name the script gave
+        raise(e.message.include?(cand) && e.class.const_defined?(:Errno) ? SystemCallError.new(dst, e.class::Errno) : e)
+      end
+    end
+    raise __errno(Errno::EEXIST, "#{File.dirname(dst)} (no free temporary name)") unless tmp
     begin
-      File.open(src, "rb") { |i| File.open(tmp, "wb") { |o| o.write(i.read) } }
-      File.chmod(s.mode & 0o7777, tmp)
       File.rename(tmp, dst)
-    rescue StandardError
+    rescue SystemCallError => e
       File.delete(tmp) if File.exist?(tmp)
-      raise
+      raise e  # the system's error, with its text (audit 2 M6: a bare raise lost it)
     end
     dst
   end
@@ -233,22 +239,43 @@ module Sh
     elsif st.directory?
       Dir.mkdir(dst) unless File.directory?(dst)
       __children("cp_r", src).each { |c| cp_r(File.join(src, c), File.join(dst, c)) }
-    else
+    elsif st.file?
       cp(src, dst)
+    else
+      # a FIFO, socket or device is not copied (reading it would block or never end): said, skipped
+      # (0.9.1, audit 2 M7)
+      $stderr.puts "rsh: cp_r: #{src}: not a plain file (#{st.ftype}), not copied"
     end
     dst
   end
 
+  # mv(src, dst): a rename; across file systems a copy (cp_r, modes kept) and then the source
+  # removed, as mv(1) (0.9.1, audit 2 M8).
   def mv(src, dst)
+    src = src.to_s
     dst = dst.to_s
-    dst = File.join(dst, File.basename(src.to_s)) if File.directory?(dst)
-    File.rename(src.to_s, dst)
+    dst = File.join(dst, File.basename(src)) if File.directory?(dst)
+    begin
+      File.rename(src, dst)
+    rescue Errno::EXDEV
+      raise ArgumentError, "mv: #{dst} is a folder in the way" if File.directory?(dst) && !File.symlink?(dst)
+      st = File.lstat(src)
+      if st.directory?
+        cp_r(src, dst)
+      elsif st.symlink?
+        File.symlink(File.readlink(src), dst)
+      else
+        cp(src, dst)
+      end
+      __rm_tree(src)
+    end
     dst
   end
 
   def ln_s(target, link) = (File.symlink(target.to_s, link.to_s); link.to_s)
 
   def chmod(mode, *paths)
+    raise ArgumentError, "chmod: give the mode as a number (0o755), not #{mode.inspect}" unless mode.is_a?(Integer)
     paths.flatten.each { |p| File.chmod(mode, p.to_s) }
     nil
   end
@@ -261,11 +288,11 @@ module Sh
 
   # tmpdir(prefix = "rsh") { |dir| ... }: a new folder only you can read (in $TMPDIR, else /tmp),
   # removed afterwards, also when the block raises; without a block the folder stays.
-  def tmpdir(prefix = "rsh")
+  def tmpdir(prefix = "rsh", suffix = "")
     base = ENV["TMPDIR"].to_s.empty? ? "/tmp" : ENV["TMPDIR"]
     d = nil
     100.times do
-      cand = File.join(base, "#{prefix}.#{Process.pid}.#{rand(1 << 30).to_s(36)}")
+      cand = File.join(base, "#{prefix}.#{Process.pid}.#{rand(1 << 30).to_s(36)}#{suffix}")
       begin
         Dir.mkdir(cand, 0o700)
         d = cand
@@ -307,7 +334,14 @@ module FileUtils
   def rmtree(list, **o) = rm_rf(list, **o)
   def cp(src, dst, **o) = (__plain(:cp, o); Array(src).each { |s| Sh.cp(s, dst) }; nil)
   def cp_r(src, dst, **o) = (__plain(:cp_r, o); Array(src).each { |s| Sh.cp_r(s, dst) }; nil)
-  def mv(src, dst, **o) = (__plain(:mv, o); Array(src).each { |s| Sh.mv(s, dst) }; 0)
+  def mv(src, dst, **o)
+    __plain(:mv, o)
+    list = Array(src)
+    # several sources need a folder to go into: onto one file they would replace each other (audit 2 M12)
+    raise ArgumentError, "FileUtils.mv: #{dst} is not a folder (#{list.size} sources)" if list.size > 1 && !File.directory?(dst.to_s)
+    list.each { |s| Sh.mv(s, dst) }
+    0
+  end
   def ln_s(src, dst, **o) = (__plain(:ln_s, o); Sh.ln_s(src, dst); 0)
   def touch(list, **o) = (__plain(:touch, o); Sh.touch(list); Array(list))
   def chmod(mode, list, **o) = (__plain(:chmod, o); Sh.chmod(mode, list); Array(list))
@@ -432,5 +466,9 @@ end
 
 class Dir
   # Dir.mktmpdir(prefix = "d") { |dir| ... }: Sh.tmpdir, the Ruby-standard name.
-  def self.mktmpdir(prefix = nil, &block) = Sh.tmpdir(prefix.nil? ? "d" : prefix.to_s, &block)
+  # prefix may be [prefix, suffix] as in Ruby (audit 2 L10)
+  def self.mktmpdir(prefix = nil, &block)
+    pre, suf = prefix.is_a?(Array) ? prefix : [prefix, nil]
+    Sh.tmpdir(pre.nil? ? "d" : pre.to_s, suf.to_s, &block)
+  end
 end

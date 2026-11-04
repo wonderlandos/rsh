@@ -72,6 +72,11 @@ module Rsh
         b.call
       rescue SystemExit => e
         status = e.status
+      rescue SignalException => e
+        # TERM, HUP or INT while an at_exit block runs: the rest still run, then rsh ends by that
+        # signal (128+N), as anywhere else (0.9.1, audit M1)
+        status = 128 + e.signo
+        Rsh.__died(e.signo)
       rescue Exception => e # rubocop:disable Lint/RescueException
         $stderr.puts("rsh: at_exit: #{e.message} (#{e.class})")
         status = 1 if status == 0

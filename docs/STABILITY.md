@@ -183,8 +183,13 @@ first weeks, **P3** rarely. Each fix has a test that fails on 0.1.4 and passes o
 - **K2** The built-in interpreter's parser takes time that grows with the square of the number of
   statements in one file: 2,000 lines take under 10 ms, 16,000 lines 0.24 s, 30,000 lines 1 s. Split a
   generated script of that size, or load parts with `require_relative`.
-- **K3** Code nested about 1,000 levels deep is "too complex expression" from the interpreter's compiler,
-  which prints that line itself, without `rsh: ` in front.
+- **K3** The built-in interpreter's limits, measured for 0.9.1 (audit 2 M10; K3 said "about 1,000
+  levels"): 125 nested `if` work and 126 are "too complex expression" (the interpreter's compiler prints
+  that line itself, without `rsh: `, then `rsh: codegen error`, status 1); 62 nested `do ... end` blocks
+  work, 63 do not; a method calling itself about 510 times deep is `SystemStackError`; one string
+  literal in the source is at most about 65,530 bytes ("string too long (truncated)", status 2; a
+  here-document and a String built at run time have no such limit: 100 MB was fine). `tests/run.sh`
+  cli "A2-M10" holds the `if` numbers.
 - **K4** `#{...}` values of a command line are read once, when the line starts: `cmd || echo
   #{$?.exitstatus}` sees the status from before the line; write `$?` (a command-line word, read when that
   part runs).
@@ -197,6 +202,24 @@ first weeks, **P3** rarely. Each fix has a test that fails on 0.1.4 and passes o
   `Process.spawn`/`wait`, no `Open3`, and no `Time.parse` beyond ISO 8601; use the programs.
 - **K8** A program ended by SIGPIPE because rsh's own output was closed (`rsh -c 'seq 1 200000' | head -1`)
   is a failed command, status 141, with its message (decided in 0.1.4).
+
+### Audit 2 of v0.9.0 (fixed in 0.9.1; CHANGELOG.md "Audit 2")
+
+H1-H3, M1-M12 and the Lows L3, L7, L8, L9, L10, L14, L15, L16 are fixed or decided, each with a test.
+Left as documented limits:
+
+- **L1** `$*` must be a whole word (`"$*"`, `x$*` are `Rsh::Error`); join in Ruby: `#{ARGV.join(" ")}`.
+- **L2** `~nosuchuser` is `Rsh::Error` (sh keeps the text).
+- **L4** a redirect's descriptor is one digit (`10>f` is the word `10` and `>f`); `>|`, `<&-`, `>&-`
+  and `N<<<` are reader errors (status 2).
+- **L5** `exit N` or a signal inside a `source`d file ends that file and is reported as `source exited
+  N` (the status is right).
+- **L6** `$$` is a command-line word; in Ruby write `Process.pid`.
+- **L11** the D1 message for a redirect that cannot open is rsh's own and goes to rsh's standard error,
+  not through the command's `2>`.
+- **L12** `-n` and `--lint` messages are `FILE:LINE: TEXT` without `rsh: ` (section 5), also for
+  `BEGIN not supported`.
+- **L13** 0.1.4 (commit 199bcc3) was never tagged; it is the comparison baseline of sections 10-12.
 
 ## 11. The 1.0 contract
 
@@ -256,6 +279,11 @@ Measured on the AWS build box (32 cores, x86_64), 2026-11-04, with other jobs ru
   time-outs, 0 out-of-memory**; `tests/soak.sh` 15 minutes, **37 rounds, 33,300 corpus runs, 0
   problems**; `make test` with the sanitizer half green; start-up `rsh -c nil` 1.97 ms against 1.91 ms
   for 0.1.4 (+3.1%); size 2,999,048 bytes.
+- **0.9.1 (audit 2 fixes)**, on a box loaded by other jobs (load 30-145): fuzz 608 s with 8 workers,
+  1,715,610 inputs, **0 crashes, 0 time-outs, 0 out-of-memory**, 22,090 edges; `tests/soak.sh`
+  **10 + 20 rounds, 27,000 corpus runs, 0 problems**; `make test` with the sanitizer half and the new
+  `tests/signals.rb` green. Start-up `rsh -c nil`, 1,500 runs interleaved with v0.9.0 in both orders:
+  2,101-2,119 us against 2,030-2,041 us (+3.5-3.8%, inside the 5% gate); size 3,003,208 bytes.
 - **Memory**: a 10,000-command session through a pseudo-terminal (six kinds of input in turn: a command,
   Ruby, `true`, a redirect, a capture, a block): RSS 2,960 KB after 1,000 commands, 3,592 KB after
   10,000 (+632 KB, history included; 0.1.4: +4,364 KB, and +6,140 KB for 10,000 `echo hi > /dev/null`).

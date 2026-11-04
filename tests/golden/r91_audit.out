@@ -1,0 +1,21 @@
+["sh exited 6", 6]
+["kept\n", 6]
+[false, 3]
+wait exited 4
+[false, 1]
+[false, 1]
+[Errno::EACCES, "Permission denied - ro/x"]
+cp: /dev/zero is not a plain file (a FIFO or device); cp copies files
+["plain"]
+[]
+[300000, "640"]
+[false, true]
+FileUtils.mv: mc is not a folder (2 sources)
+[true, true]
+withfifo
+Errno::ENOTDIR
+find: maxdepth is 1 or more (1: the entries of dir; dir itself is never listed)
+find: the pattern "a{b" has a { without its }
+[true, true]
+chmod: give the mode as a number (0o755), not "u+x"
+status: 0

@@ -1,0 +1,3 @@
+rsh: source: /tmp: Is a directory
+rsh: source: /dev/null: not a plain file
+rsh: cp_r: withfifo/pipe: not a plain file (fifo), not copied

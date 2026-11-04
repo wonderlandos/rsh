@@ -167,8 +167,8 @@ puts down.empty? ? "all up" : "down: #{down.join(", ")}"
 From the release source (needs a C++20 compiler, `make`, `bison`, `ruby` and `pcre2`; `ruby` is only used while building):
 
 ```sh
-curl -fsSLO https://github.com/wonderlandos/rsh/archive/refs/tags/v0.9.0.tar.gz
-tar -xzf v0.9.0.tar.gz && cd rsh-0.9.0
+curl -fsSLO https://github.com/wonderlandos/rsh/archive/refs/tags/v0.9.1.tar.gz
+tar -xzf v0.9.1.tar.gz && cd rsh-0.9.1
 make && make test
 sudo make install            # /usr/local/bin/rsh and its manual page
 ```

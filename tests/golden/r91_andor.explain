@@ -1,0 +1,30 @@
+mode: shell
+methods: note
+   1 R  # 0.9.1, audit 2 H3 (the CTO's decision): after && and || the next word is read by the same rules
+   2 R  # as at the start of a statement (docs/design.md S1.3 rules 2-5, S1.4, S1.5, S2.8).
+   3 R  def note(text)
+   4 R    puts "note: #{text}"
+   5 R  end
+   6 R  n = 0
+   7 R  list = []
+   8 C  $ true && n += 1
+   9 C  $ true && n = n + 1
+  10 C  $ true && n=n+1
+  11 C  $ true && list << "pushed"
+  12 R  p n, list
+  13 C  $ true && note "a method of the file"
+  14 C  $ true && note("with parentheses")
+  15 C  $ false || puts("puts with parentheses")
+  16 C  $ false || puts "puts as Ruby's puts (it was the program puts, 127)"
+  17 C  $ true && STDOUT.puts "a Capitalised receiver"
+  18 C  $ true && self.note "self.name"
+  19 C  $ true && $ echo "the escape hatch forces a command"
+  20 C  $ true && echo "a plain word is still a command"
+  21 C  $ true && FOO=env-prefix sh -c 'echo "NAME=value cmd: $FOO"'
+  22 C  $ true && ./no-such-path-zz || echo "a path is a command: $?"
+  23 C  $ true && echo =x
+  24 C  $ false || nil
+  25 C  $ false || true
+  26 R  p $?.exitstatus
+  27 C  sh -c 'exit 1' || exit 0
+  28    
