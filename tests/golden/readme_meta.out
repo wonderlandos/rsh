@@ -1,0 +1,4 @@
+a b; rm -rf /
+config server = ["web 1"]
+configured
+status: 0

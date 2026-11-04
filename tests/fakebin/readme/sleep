@@ -1,0 +1,4 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Test stand-in for sleep (README examples): says how long it would wait, returns at once.
+echo "sleep $*"

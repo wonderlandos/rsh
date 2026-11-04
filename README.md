@@ -21,7 +21,7 @@ full = usage.select { |mount, pct| pct > 90 }.keys
 $stderr.puts "almost full: #{full.join(", ")}" if full.any?
 ```
 
-Line 5 and the two back-quoted parts are commands; everything else is Ruby. `#{old}` gives `tar` one argument per file, so `logs/a b.log` stays one file. If `tar` fails, the script stops there with `rsh: tidy.rsh:5: tar exited 2`.
+Line 5 and the two back-quoted parts are commands; everything else is Ruby. `#{old}` gives `tar` one argument per file, so `logs/a b.log` stays one file. If `tar` fails, `rm` does not run (the left side of `&&` is a condition, as in `sh`); if `rm` fails, the script stops there with `rsh: tidy.rsh:5: rm exited 1`.
 
 ## Why
 
@@ -167,8 +167,8 @@ puts down.empty? ? "all up" : "down: #{down.join(", ")}"
 From the release source (needs a C++17 compiler, `make`, `bison`, `ruby` and `pcre2`; `ruby` is only used while building):
 
 ```sh
-curl -fsSLO https://github.com/wonderlandos/rsh/archive/refs/tags/v0.1.1.tar.gz
-tar -xzf v0.1.0.tar.gz && cd rsh-0.1.1
+curl -fsSLO https://github.com/wonderlandos/rsh/archive/refs/tags/v0.1.2.tar.gz
+tar -xzf v0.1.2.tar.gz && cd rsh-0.1.2
 make && make test
 sudo make install            # /usr/local/bin/rsh and its manual page
 ```
@@ -177,7 +177,7 @@ sudo make install            # /usr/local/bin/rsh and its manual page
 
 On WolOS: `wol pkg -- -S rsh`. The terminal then offers rsh as its shell, and `wol script run|check|on` accepts `.rsh` and `.rb` files.
 
-The result is one program, under 3 MB, that starts in about 2.5 ms.
+The result is one program, under 3 MB, that starts in about 1.2 ms.
 
 ## Run
 

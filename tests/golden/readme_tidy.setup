@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+mkdir logs
+: >"logs/a b.log"
+: >logs/old.log
+: >logs/new.log
+touch -d "30 days ago" "logs/a b.log" logs/old.log

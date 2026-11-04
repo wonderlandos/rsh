@@ -1,0 +1,9 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Test stand-in for df -P (README examples): a fixed table, /data 93% full.
+cat <<'T'
+Filesystem     1024-blocks      Used Available Capacity Mounted on
+/dev/vda2         41152736  20576368  18463296      53% /
+/dev/vdb1        103081248  95865560   2558680      93% /data
+tmpfs              1018708         0   1018708       0% /dev/shm
+T

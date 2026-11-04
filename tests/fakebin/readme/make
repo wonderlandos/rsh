@@ -1,0 +1,8 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Test stand-in for make (README examples): `make` builds, `make test` fails with 2.
+if [ "${1:-}" = test ]; then
+	echo "test 3 failed" >&2
+	exit 2
+fi
+echo "build ok"

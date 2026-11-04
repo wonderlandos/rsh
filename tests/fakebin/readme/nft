@@ -1,0 +1,6 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Test stand-in for nft (README examples): prints its arguments, one <...> each, changes nothing.
+printf 'nft:'
+for a in "$@"; do printf ' <%s>' "$a"; done
+printf '\n'

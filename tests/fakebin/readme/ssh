@@ -1,0 +1,19 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Test stand-in for ssh (README examples): options are skipped; db1 cannot be reached (255),
+# on web2 the remote command fails with 3, everywhere else it succeeds and prints nothing.
+while [ $# -gt 0 ]; do
+	case $1 in
+	-o) shift 2 ;;
+	-*) shift ;;
+	*) break ;;
+	esac
+done
+case $1 in
+db1)
+	echo "ssh: connect to host db1 port 22: No route to host" >&2
+	exit 255
+	;;
+web2) exit 3 ;;
+esac
+exit 0

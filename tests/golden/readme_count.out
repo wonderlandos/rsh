@@ -1,0 +1,3 @@
+nft: <add> <element> <inet> <filter> <blocked> <{ 10.0.0.9 }>
+nft: <add> <element> <inet> <filter> <blocked> <{ 10.0.0.7 }>
+status: 0

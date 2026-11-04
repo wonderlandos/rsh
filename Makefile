@@ -58,15 +58,25 @@ build/obj/%.o: src/%.cpp $(wildcard src/*.hpp) $(MLIB)
 build/prelude.c: src/prelude.rb $(MLIB)
 	$(MRBC) -Brsh_prelude -o $@ src/prelude.rb
 
+# The Ruby side of Regexp: compiled in the same way, loaded on first use (src/rt.cpp, m_regexp).
+build/prelude_regexp.c: src/prelude_regexp.rb $(MLIB)
+	$(MRBC) -Brsh_prelude_regexp -o $@ src/prelude_regexp.rb
+
 build/obj/prelude.o: build/prelude.c
 	@mkdir -p build/obj
 	$(CC) -Os -I$(M)/include -I$(M)/build/rsh/include -c $< -o $@
 
-build/rsh: $(OBJ) build/obj/prelude.o $(MLIB)
-	$(CXX) $(CXXFLAGS) -o $@ $(OBJ) build/obj/prelude.o $(MLIB) $(LDFLAGS) $(LIBS)
+build/obj/prelude_regexp.o: build/prelude_regexp.c
+	@mkdir -p build/obj
+	$(CC) -Os -I$(M)/include -I$(M)/build/rsh/include -c $< -o $@
 
-build/unit: tests/unit.cpp $(LIBOBJ) build/obj/prelude.o $(MLIB)
-	$(CXX) $(CXXFLAGS) $(PCRE) -Isrc -o $@ tests/unit.cpp $(LIBOBJ) build/obj/prelude.o $(MLIB) $(LDFLAGS) $(LIBS)
+PRELUDE = build/obj/prelude.o build/obj/prelude_regexp.o
+
+build/rsh: $(OBJ) $(PRELUDE) $(MLIB)
+	$(CXX) $(CXXFLAGS) -o $@ $(OBJ) $(PRELUDE) $(MLIB) $(LDFLAGS) $(LIBS)
+
+build/unit: tests/unit.cpp $(LIBOBJ) $(PRELUDE) $(MLIB)
+	$(CXX) $(CXXFLAGS) $(PCRE) -Isrc -o $@ tests/unit.cpp $(LIBOBJ) $(PRELUDE) $(MLIB) $(LDFLAGS) $(LIBS)
 
 test: build/unit build/rsh
 	./build/unit

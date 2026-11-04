@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.2
+
+- The README examples are tests: each ```` ```ruby ```` block of `README.md` is in a
+  `tests/golden/readme_*.rsh` with its expected output, run with stand-ins for `curl`, `ssh`, `nft`,
+  `make`, `df` and `sleep` (`tests/fakebin/readme/`), and `tests/run.sh` fails when a block of the
+  README is in none of them. A `NAME.setup` file next to a test makes the files it works on.
+- `String#[]` and `String#slice` take a Regexp (`line[/\d+/]`, `line[/(\w+) (\d+)/, 2]`, a group
+  name); before, a TypeError. `File.mtime` exists. `case ... when /re/` sets `$~` and `$1`.
+- Start-up: the Ruby side of Regexp (MatchData, `Regexp.escape`, the String methods that take a
+  pattern) loads the first time a pattern is made or one of those methods is called, not at
+  start-up. `rsh -c nil` is back at the 0.1.0 time (median 1.16 ms against 1.16 ms for 0.1.0 and
+  1.20 ms for 0.1.1, 400 interleaved runs); a script that makes a pattern pays for the load then
+  (about 0.05 ms more than 0.1.1 for a one-line `=~`).
+- `tests/golden/core_words.rsh` (`warn`, `abort`, `File.mtime`, `String#[]` with a Regexp),
+  `tests/golden/regexp_lazy.rsh` (the methods before and after the Regexp side loads).
+- README: the install lines name the same tarball in both commands.
+
 ## 0.1.1
 
 - `.rb` files have the shell layer, like `.rsh` files: Ruby and command lines mix the same way.

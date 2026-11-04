@@ -1,0 +1,22 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Test stand-in for curl (README examples): the last argument is the URL. .../issues answers a
+# fixed JSON list; .../flaky fails twice (count kept in ./.tries), then "downloads" the file.
+for a; do u=$a; done
+case $u in
+*/issues) printf '[{"number":3,"title":"Ctrl-Z test","labels":[{"name":"bug"}]},{"number":4,"title":"docs","labels":[]}]\n' ;;
+*/flaky*)
+	n=$(cat .tries 2>/dev/null || echo 0)
+	n=$((n + 1))
+	echo "$n" >.tries
+	if [ "$n" -lt 3 ]; then
+		echo "curl: (7) Failed to connect" >&2
+		exit 7
+	fi
+	echo "curl: got ${u##*/} on try $n"
+	;;
+*)
+	echo "curl: (6) Could not resolve host" >&2
+	exit 6
+	;;
+esac

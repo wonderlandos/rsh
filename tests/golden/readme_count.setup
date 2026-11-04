@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+cat >auth.log <<'L'
+Nov 03 10:00:01 box sshd[1]: Failed password for root from 10.0.0.9 port 22
+Nov 03 10:00:02 box sshd[1]: Failed password for admin from 10.0.0.9 port 22
+Nov 03 10:00:03 box sshd[1]: Accepted publickey for julia from 10.0.0.2 port 22
+Nov 03 10:00:04 box sshd[1]: Failed password for root from 10.0.0.7 port 22
+Nov 03 10:00:05 box sshd[1]: Failed password for admin from 10.0.0.7 port 22
+Nov 03 10:00:06 box sshd[1]: Failed password for root from 10.0.0.9 port 22
+Nov 03 10:00:07 box sshd[1]: Failed password for root from 10.0.0.5 port 22
+L

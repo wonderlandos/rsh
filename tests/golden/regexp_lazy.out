@@ -1,0 +1,24 @@
+["a", "b", "c"]
+"aBc"
+"aBc"
+"b"
+2
+true
+"axcb"
+1
+true
+["a", "a"]
+true
+"."
+TypeError: wrong argument type String (expected Regexp)
+1
+"1\\+1"
+/a\.|b+/
+"z"
+"."
+"1"
+["a", "b"]
+"a2b44"
+"2"
+host 12
+status: 0

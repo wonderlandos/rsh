@@ -9,6 +9,7 @@
 #include <mruby/class.h>
 #include <mruby/compile.h>
 #include <mruby/data.h>
+#include <mruby/dump.h>
 #include <mruby/error.h>
 #include <mruby/hash.h>
 #include <mruby/irep.h>
@@ -17,6 +18,7 @@
 #include <mruby/variable.h>
 #include <pcre2.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -30,6 +32,7 @@
 
 extern char** environ;
 extern "C" const uint8_t rsh_prelude[];
+extern "C" const uint8_t rsh_prelude_regexp[];
 
 namespace rsh {
 
@@ -273,6 +276,18 @@ mrb_value m_kill(mrb_state* mrb, mrb_value) {
     return mrb_true_value();
 }
 
+// File.mtime(path): the time of the last change to the file's contents (Errno::ENOENT and the
+// other Errno errors as in Ruby).
+mrb_value m_file_mtime(mrb_state* mrb, mrb_value) {
+    mrb_value path;
+    mrb_get_args(mrb, "S", &path);
+    struct stat st;
+    if (stat(mrb_string_cstr(mrb, path), &st) != 0) mrb_sys_fail(mrb, mrb_string_cstr(mrb, path));
+    mrb_value t = mrb_obj_value(mrb_class_get(mrb, "Time"));
+    return mrb_funcall(mrb, t, "at", 2, mrb_int_value(mrb, (mrb_int)st.st_mtim.tv_sec),
+                       mrb_int_value(mrb, (mrb_int)(st.st_mtim.tv_nsec / 1000)));
+}
+
 mrb_value m_glob(mrb_state* mrb, mrb_value) {
     const char* p;
     mrb_get_args(mrb, "z", &p);
@@ -504,7 +519,32 @@ std::string translate(const std::string& s) {
     return o;
 }
 
+// Rsh.__regexp: loads the Ruby side of Regexp (src/prelude_regexp.rb) once per interpreter; true
+// if it was loaded by this call. Called by the first Regexp made and by the stand-ins in
+// src/prelude.rb, so start-up does not read it.
+mrb_value m_regexp(mrb_state* mrb, mrb_value) {
+    mrb_value re = mrb_obj_value(mrb_class_get(mrb, "Regexp"));
+    mrb_sym done = mrb_intern_lit(mrb, "__rsh_loaded");
+    if (mrb_iv_defined(mrb, re, done)) return mrb_false_value();
+    mrb_iv_set(mrb, re, done, mrb_true_value());
+    // At the top level, as src/prelude.rb is: `class MatchData` names ::MatchData even though the
+    // caller is a method (mrb_load_irep would take the caller's class as the place for definitions).
+    mrb_irep* irep = mrb_read_irep(mrb, rsh_prelude_regexp);
+    if (!irep) mrb_raise(mrb, E_SCRIPT_ERROR, "rsh: the Regexp side did not load");
+    RProc* proc = mrb_proc_new(mrb, irep);
+    mrb_irep_decref(mrb, irep);
+    MRB_PROC_SET_TARGET_CLASS(proc, mrb->object_class);
+    mrb_top_run(mrb, proc, mrb_top_self(mrb), 0);
+    if (mrb->exc) {
+        mrb_value e = mrb_obj_value(mrb->exc);
+        mrb->exc = nullptr;
+        mrb_exc_raise(mrb, e);
+    }
+    return mrb_true_value();
+}
+
 mrb_value m_re_init(mrb_state* mrb, mrb_value self) {
+    m_regexp(mrb, self);
     mrb_value src, opt = mrb_nil_value();
     mrb_get_args(mrb, "o|o", &src, &opt);
     if (mrb_obj_is_kind_of(mrb, src, mrb_class_get(mrb, "Regexp"))) {
@@ -941,6 +981,8 @@ mrb_state* rt_open(const std::string& script, const std::vector<std::string>& ar
     mrb_define_module_function(mrb, r, "__translate", m_translate, MRB_ARGS_REQ(4));
     mrb_define_module_function(mrb, r, "__load", m_load, MRB_ARGS_REQ(3));
     mrb_define_module_function(mrb, r, "__declare", m_declare, MRB_ARGS_REQ(1));
+    mrb_define_module_function(mrb, r, "__regexp", m_regexp, MRB_ARGS_NONE());
+    mrb_define_class_method(mrb, mrb_class_get(mrb, "File"), "mtime", m_file_mtime, MRB_ARGS_REQ(1));
     RClass* re = mrb_define_class(mrb, "Regexp", mrb->object_class);
     MRB_SET_INSTANCE_TT(re, MRB_TT_CDATA);
     mrb_define_method(mrb, re, "initialize", m_re_init, MRB_ARGS_ARG(1, 1));

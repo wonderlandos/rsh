@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Only the file with a new line in its name has TODOs (find's order differs between file systems).
+mkdir src
+printf 'TODO one\nTODO two\n' >"src/new
+line.txt"
+printf 'done\n' >"src/a b.txt"
+printf 'nothing\n' >src/c.txt

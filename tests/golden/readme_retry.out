@@ -1,0 +1,4 @@
+sleep 1
+sleep 2
+curl: got page.html on try 3
+status: 0
