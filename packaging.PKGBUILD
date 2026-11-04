@@ -18,7 +18,7 @@ source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
         "mruby-$_mruby_commit.tar.gz::https://github.com/mruby/mruby/archive/$_mruby_commit.tar.gz")
 noextract=("mruby-$_mruby_commit.tar.gz")
 # The release tarball's sha256 is written here once the v$pkgver tag exists (docs/STABILITY.md, release gate 3).
-sha256sums=('SKIP'
+sha256sums=('9fc0ebe7ea331286219e8128ab5ea2ddc6b899c3cb1c38b9c427b7bab56c8424'
             'e4fb1bbad8276878e84e3c3b6161ac35a4216853de404f8463675aa2d1920b4f')
 
 build() {
