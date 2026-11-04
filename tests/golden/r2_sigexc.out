@@ -1,0 +1,15 @@
+SIGHUP
+1
+SIGTERM
+15
+custom
+10
+SIGTERM
+15
+""
+2
+true
+"stop"
+unsupported signal 'SIGNOSUCH'
+rescued Interrupt 2
+status: 0

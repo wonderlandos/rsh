@@ -44,5 +44,11 @@ test -d / || echo or
 echo a; echo b
 echo trailing # a comment
 echo "quote # not a comment"
+echo {a,b}
+! test -e /no/such/file
+Pair=Struct.new(:x) do
+end
+X=1 env true
+test -d / || exit 1
 Struct.new(:a)
 exit 0

@@ -340,8 +340,30 @@ The script's own
 .BR exit ;
 else the status of the failed command that ended it (128+N when a signal N ended it); 130 when
 interrupted; 1 for a Ruby error; 2 for a mistake in the script itself found before it runs, or a
-bad option; 127 if the file cannot be read or a command is not found; 126 if a command cannot run;
+bad option; 127 if the file cannot be read or a command is not found; 126 if a command cannot run (a
+file that is not executable, a folder given as the script);
 70 if the interpreter cannot start. These are frozen (docs/STABILITY.md in the source).
+.SH SIGNALS
+TERM, HUP and INT end a script by raising SignalException (Interrupt for INT) at its next
+safe point (a command line, an iteration of
+.BR loop ,
+the end of
+.BR sleep ),
+so
+.B ensure
+clauses and
+.B at_exit
+blocks run; rsh then ends by that signal (status 128+N).
+.B trap
+(or
+.BR Signal.trap )
+takes a block,
+.B IGNORE
+or
+.BR DEFAULT .
+Code that reaches no safe point (a
+.B while true
+with nothing in it) is ended by the signal itself after 2 seconds, or by a second one that comes a second after the first.
 .SH ENVIRONMENT
 .TP
 .B XDG_CONFIG_HOME

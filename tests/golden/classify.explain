@@ -1,5 +1,5 @@
 mode: shell
-methods: a helper never
+methods: a helper never x
    1 R  #!/usr/bin/rsh
    2 R  # SPDX-License-Identifier: GPL-2.0-or-later
    3 R  # How each line is read: R Ruby, C command line, X a capture inside Ruby (see classify.explain).
@@ -46,6 +46,12 @@ methods: a helper never
   44 C  echo a; echo b
   45 C  echo trailing # a comment
   46 C  echo "quote # not a comment"
-  47 R  Struct.new(:a)
-  48 R  exit 0
-  49    
+  47 C  echo {a,b}
+  48 C  ! test -e /no/such/file
+  49 R  Pair=Struct.new(:x) do
+  50 R  end
+  51 C  X=1 env true
+  52 C  test -d / || exit 1
+  53 R  Struct.new(:a)
+  54 R  exit 0
+  55    

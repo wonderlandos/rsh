@@ -8,6 +8,7 @@ require 'pty'
 require 'io/console'
 require 'tmpdir'
 require 'fileutils'
+require 'timeout'
 
 rsh = File.expand_path(ARGV[0] || File.join(__dir__, '../build/rsh'))
 home = Dir.mktmpdir('rsh-int')
@@ -37,7 +38,7 @@ PTY.spawn(env, rsh, unsetenv_others: true) do |out, inp, pid|
   expect.call('command runs', "echo hi there\r", "\nhi there")
   expect.call('ruby value', "x = 3\r", '=> 3')
   expect.call('ruby uses it', "puts x * 2\r", "\n6")
-  expect.call('tab completes a file', "ls /etc/hostn\t\r", '/etc/hostname')
+  expect.call('tab completes a file', "ls /etc/os-relea\t\r", '/etc/os-release')
   expect.call('background job', "sleep 1 &\r", '[1]')
   expect.call('jobs lists it', "jobs\r", 'Running')
   inp.write("[1,2].map do |n|\r")
@@ -132,6 +133,100 @@ seen = session.call(home3, ["echo via-link\r"])
 check.call("history link refused: #{seen[0, 300].inspect}", seen.include?('it is a symbolic link'))
 check.call('the link target is not written', File.read(target).empty?)
 [home2, home3].each { |d| FileUtils.rm_rf(d) }
+
+# 0.1.4 (QA-100 round 2). A session in a fresh home, a work folder, keys written as given; returns
+# what the terminal showed, escapes taken out (raw: with them) and the bytes the shell wrote.
+home4 = Dir.mktmpdir('rsh-int4')
+work = File.join(home4, 'work')
+Dir.mkdir(work)
+File.write(File.join(work, 'sp ace'), "spaced\n")
+File.write(File.join(work, "quo'te"), "quoted\n")
+run = lambda do |keys, wait: 0.5, raw: false|
+  seen = +''
+  PTY.spawn(env.merge('HOME' => home4), rsh, chdir: work, unsetenv_others: true) do |out, inp, pid|
+    read = lambda do |w|
+      buf = +''
+      buf << out.read_nonblock(65_536) while IO.select([out], nil, nil, w)
+      buf
+    rescue EOFError, Errno::EIO
+      buf
+    end
+    read.call(0.6)
+    keys.each do |k|
+      if k.is_a?(Numeric)
+        sleep k
+        next
+      end
+      inp.write(k)
+      seen << read.call(wait)
+    end
+    inp.write("\x04")
+    seen << read.call(0.3)
+    Process.kill('KILL', pid) rescue nil # rubocop:disable Style/RescueModifier
+  end
+  raw ? seen : seen.gsub(/\e\[[0-9;?]*[A-Za-z~]/, '')
+end
+# R2-1: the first program that reads the terminal is not stopped by SIGTTIN (it took the terminal
+# only after the program had started; 15 of 20 sessions stopped). Twenty sessions (a race: the 0.1.3 binary stopped 1 of 20 here, 15 of 20 in the audit).
+stopped = 0
+20.times do
+  got = run.call(["true\r", "cat\r", 0.2, "hello\r", "\x04"], wait: 0.3)
+  stopped += 1 if got.include?('Stopped') || !got.include?('hello')
+end
+check.call("R2-1: cat after true was stopped (or did not echo) in #{stopped} of 20 sessions", stopped.zero?)
+# R2-2: three lines in one write all run (TCSAFLUSH threw away the rest of a paste).
+got = run.call(["puts 11\rputs 22\rputs 33\r"], wait: 1.0)
+check.call("R2-2: a pasted block runs line by line: #{got.inspect}", got.include?("11\r\n") && got.include?("22\r\n") && got.include?("33\r\n"))
+got = run.call(["sleep 0.3\recho typed-ahead\r"], wait: 1.2)
+check.call("R2-2: a line typed while a command runs is kept: #{got.inspect}", got.include?("typed-ahead\r\n"))
+# R2-8, L-17: a 5,000-character paste is drawn about once, not 5,000 times (12.9 MB before).
+got = run.call(['echo ' + ('x' * 5000)], wait: 1.0, raw: true)
+check.call("R2-8: a 5,000-byte paste wrote #{got.bytesize} bytes to the terminal", got.bytesize < 50_000)
+# M-7, R2-16: a completed name is one word of the line.
+got = run.call(["cat sp\t\r", "cat quo\t\r"])
+check.call("M-7: completion quotes a name with a space: #{got.inspect}", got.include?('cat sp\\ ace') && got.include?("spaced\r\n"))
+check.call("R2-16: completion quotes a name with a quote: #{got.inspect}", got.include?("cat quo\\'te") && got.include?("quoted\r\n"))
+# R2-15: after | the word is a command again.
+got = run.call(["echo x | wc -\t\x15", "echo x | tr\t\x15"])
+check.call("R2-15: completion after | offers commands: #{got.inspect}", got.include?('tr '))
+# R2-9: an arrow ends a history search and moves in the line found; its bytes are not text.
+got = run.call(["echo second\r", "\x12sec", "\e[D", "X\r"])
+check.call("R2-9: Ctrl-R then Left: #{got.inspect}", got.include?("seconXd\r\n") && !got.include?('[D'))
+# R2-10: ESC then Enter is Enter.
+got = run.call(["echo esc-enter\e\r", "echo next\r"])
+check.call("R2-10: ESC then Enter runs the line: #{got.inspect}", got.include?("esc-enter\r\n") && got.include?("next\r\n"))
+# M-9: history lists the entries of this session (and the earlier ones: this home has them now).
+got = run.call(["echo hist-one\r", "history\r"])
+check.call("M-9: history numbers this session's entries and the earlier ones: #{got.inspect}",
+           got =~ /\d+  echo hist-one/ && got =~ /\d+  echo second/)
+# H-2: Ctrl-C during Ruby code interrupts it (ensure runs) and the shell goes on.
+got = run.call(["begin; loop {}; ensure; puts 'ensure-ran'; end\r", 0.3, "\x03", "puts 'still-here'\r"])
+check.call("H-2: Ctrl-C during loop {}: #{got.inspect}", got.include?("ensure-ran") && got.include?("still-here\r\n"))
+# R2-19: exit with a job running says so once; the second exit leaves.
+got = run.call(["sleep 5 &\r", "exit\r", "echo still-in\r", "exit\r"])
+check.call("R2-19: exit with a running job warns once: #{got.inspect}", got.include?('jobs still running') && got.include?("still-in\r\n"))
+# R2-13: SIGTERM while Ruby code loops: ensure runs, the shell ends by the signal (it ignored TERM
+# until -9). The loop is started, TERM comes 0.4 s later.
+status = nil
+PTY.spawn(env.merge('HOME' => home4), rsh, chdir: work, unsetenv_others: true) do |out, inp, pid|
+  sleep 0.6
+  inp.write("begin; loop {}; ensure; puts 'term-ens' + 'ure'; end\r")
+  sleep 0.4
+  Process.kill('TERM', pid)
+  seen = +''
+  begin
+    Timeout.timeout(5) { seen << out.readpartial(4096) while true } # rubocop:disable Style/WhileUntilDo
+  rescue EOFError, Errno::EIO
+    nil
+  rescue Timeout::Error
+    seen << 'TIMEOUT'
+    Process.kill('KILL', pid)
+  end
+  status = Process.wait2(pid)[1] rescue nil # rubocop:disable Style/RescueModifier
+  check.call("R2-13: TERM during loop {} ran ensure and ended (#{status.inspect}): #{seen.inspect}",
+             seen.include?('term-ensure') && !seen.include?('TIMEOUT'))
+end
+FileUtils.rm_rf(home4)
 
 puts "interactive: #{checks} checks, #{failed.size} failed"
 failed.each { |f| warn f }

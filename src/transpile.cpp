@@ -135,6 +135,14 @@ struct CmdParser {
     int nl = 0;
     bool capture = false;
     bool do_block = false;
+    // `cmd || exit 1`, `cmd && return`: after && or || a Ruby control word ends the command line and
+    // the rest of the statement is Ruby (0.1.4, audit R2-7). `tail` is where it starts, npos if none.
+    size_t tail = std::string::npos;
+    bool tail_or = false, tail_colon = false;
+    bool after_andor = false;
+    // After `then`, `else` or `do` on the same line: a last word `end` (or `else`, `elsif`) closes
+    // the Ruby construct, it is not an argument (`if x then echo a end`, audit M-8).
+    bool inline_end = false;
     struct Pending {
         size_t item, cmd, redir;
         std::string delim;
@@ -216,10 +224,12 @@ struct CmdParser {
         if (c == '?') add_val(w, Part::Status, -1), i += 2;
         else if (c == '*') add_val(w, Part::Args, -1), i += 2;
         else if (c == '!') add_val(w, Part::BgPid, -1), i += 2;
+        else if (c == '$') add_val(w, Part::Val, value("(Process.pid)")), i += 2;  // audit L-3
         else if (c == '(') return fail("$(...) is not rsh: capture with #{`command`} or a Ruby variable");
         else if (c == '{') {
             size_t e = s.find('}', i + 2);
             if (e == std::string::npos || e >= lim) return fail("${ without a closing }");
+            if (e == i + 2) return fail("${} needs a variable name: ${HOME}");
             add_val(w, Part::Env, -1, s.substr(i + 2, e - i - 2));
             i = e + 1;
         } else if (std::isdigit((unsigned char)c) || c == '@' || c == '#')
@@ -379,9 +389,12 @@ struct CmdParser {
         Item it;
         Cmd c;
         bool ruby_after = false;
+        bool after_pipe = false;  // `echo a |` with nothing after it (audit M-2)
         for (;;) {
             skip_blank();
             if (line_end()) break;
+            if (s[i] == '#' && !(i + 1 < lim && s[i + 1] == '{')) {
+            } else after_pipe = after_pipe && s[i] == '|';
             char ch = s[i];
             char nx = i + 1 < lim ? s[i + 1] : 0;
             if (ch == '#' && nx != '{') {
@@ -397,12 +410,15 @@ struct CmdParser {
                     push_item(L, it);
                     i += 2;
                     skip_newlines();
+                    if (ruby_tail(true)) break;
+                    after_andor = true;
                     continue;
                 }
                 if (nx == '&') c.pipe_err = true, ++i;
                 if (!finish_cmd(it, c)) return false;
                 ++i;
                 skip_newlines();
+                after_pipe = true;
                 if (i < lim && s[i] == '{') {
                     size_t e = match_brace(s, i + 1, lim);
                     if (e == std::string::npos) return fail("a Ruby stage { |line| ... } is not closed");
@@ -423,6 +439,8 @@ struct CmdParser {
                 push_item(L, it);
                 i += 2;
                 skip_newlines();
+                if (ruby_tail(false)) break;
+                after_andor = true;
                 continue;
             }
             if (ch == '&' && nx != '>') {
@@ -442,15 +460,27 @@ struct CmdParser {
                 if (!redirect(c, ch - '0')) return false;
                 continue;
             }
-            if (ch == '(' || ch == ')') return fail("( ) do not group commands in rsh: use Ruby (if, begin ... end)");
+            if (ch == '(' || ch == ')') {
+                if (after_andor && ch == '(' && c.words.empty())
+                    return fail("( ) do not group commands in rsh: after && or || write the Ruby itself (cmd || exit 1)");
+                return fail("( ) do not group commands in rsh: use Ruby (if, begin ... end)");
+            }
+            if (ch == '{' && after_andor && c.words.empty() && (nx == ' ' || nx == '\t'))
+                return fail("{ ...; } does not group commands in rsh: after && or || write the Ruby itself (cmd || exit 1)");
+            after_andor = false;
             if (ch == '!' && c.words.empty() && (nx == ' ' || nx == '\t')) {
                 it.bang = true;
                 ++i;
                 continue;
             }
             Word w;
+            size_t word_at = i;
             if (!word(w)) return false;
-            if (w.parts.empty()) return fail(std::string("unexpected ") + s[i]);
+            if (w.parts.empty()) return fail(s[i] == '\0' ? std::string("unexpected NUL byte (\\0)") : std::string("unexpected ") + s[i]);
+            if (inline_end && !c.words.empty() && (plain(w, "end") || plain(w, "else") || plain(w, "elsif"))) {
+                i = word_at;
+                break;
+            }
             if (env_prefix(c, w)) continue;
             if (!c.words.empty()) {
                 if (plain(w, "do")) {
@@ -468,15 +498,43 @@ struct CmdParser {
             }
             c.words.push_back(std::move(w));
         }
+        if (after_pipe && c.words.empty() && c.block < 0 && c.env.empty() && c.redirs.empty())
+            return fail("a command is missing after |");
         if (!c.words.empty() || c.block >= 0 || !c.env.empty() || !c.redirs.empty()) {
             if (!finish_cmd(it, c)) return false;
         }
         if (!it.pipeline.empty()) push_item(L, it);
-        else if (!L.items.empty() && L.items.back().op != Op::Bg) return fail("a command is missing after && or ||");
+        else if (!L.items.empty() && L.items.back().op != Op::Bg && tail == std::string::npos)
+            return fail("a command is missing after && or ||");
         if (L.items.empty()) return fail("an empty command line");
         if (L.items.back().op == Op::Bg) {
         } else L.items.back().op = Op::End;
-        if (!here.empty()) return bodies(L);
+        if (!here.empty()) {
+            if (tail != std::string::npos) return fail("a here-document line cannot go on in Ruby after && or ||: put the Ruby on its own line");
+            return bodies(L);
+        }
+        return true;
+    }
+    // At a word after && or ||: exit, raise, abort, return, break, next, fail, throw (Ruby's control
+    // words; never programs that matter) or a lone `:` (sh's no-op).
+    bool ruby_tail(bool is_or) {
+        if (capture || i >= lim) return false;
+        size_t e = i;
+        if (s[i] == ':') {
+            e = i + 1;
+            if (e < lim && !blank(s[e]) && s[e] != '\n' && s[e] != ';' && s[e] != '#') return false;
+            tail_colon = true;
+        } else {
+            while (e < lim && ident_char(s[e])) ++e;
+            if (e < lim && s[e] == '!') ++e;
+            std::string w = s.substr(i, e - i);
+            bool ok = false;
+            for (const char* t : {"exit", "exit!", "raise", "fail", "abort", "return", "break", "next", "throw"}) ok |= w == t;
+            if (!ok) return false;
+            if (e < lim && !blank(s[e]) && !std::strchr("\n;(#", s[e])) return false;
+        }
+        tail = tail_colon ? e : i;
+        tail_or = is_or;
         return true;
     }
     // Here-document bodies: the lines after this one, up to each end word.
@@ -515,7 +573,9 @@ struct CmdParser {
             Word w;
             if (p.literal) add(w, Part::Lit, text);
             else {
-                // #{...} and $NAME work; a backslash keeps the next character.
+                // #{...} and $NAME work. As in sh a backslash is taken away only before $, `, \, a
+                // newline (and #{ here); before anything else it stays (\n in a printf format, a
+                // Windows path, a regex: 0.1.4, audit M-3).
                 size_t k = 0;
                 std::string lit;
                 auto flush = [&] {
@@ -525,7 +585,10 @@ struct CmdParser {
                 while (k < text.size()) {
                     char ch = text[k];
                     if (ch == '\\' && k + 1 < text.size()) {
-                        lit += text[k + 1];
+                        char d = text[k + 1];
+                        if (d == '\n') {
+                        } else if (d == '$' || d == '`' || d == '\\' || (d == '#' && k + 2 < text.size() && text[k + 2] == '{')) lit += d;
+                        else lit += std::string("\\") + d;
                         k += 2;
                     } else if (ch == '#' && k + 1 < text.size() && text[k + 1] == '{') {
                         size_t e = match_brace(text, k + 2, text.size());
@@ -584,6 +647,7 @@ struct Tx {
     // `kw` counts the open keyword constructs (class def if ... do ... end).
     int kw = 0;
     bool loop_do = false;       // after while/until/for: their `do` opens nothing
+    bool inline_kw = false;     // then/else/do earlier on this line (CmdParser::inline_end)
     bool pending_ruby = false;  // `ruby` at a statement start, its `do` or `{` comes next
     int pending_line = 0;
     struct Region {
@@ -604,6 +668,8 @@ struct Tx {
         i = e;
     }
     void error(int ln, const std::string& m) { res.diags.push_back({ln, m, false}); }
+    void warning(int ln, const std::string& m) { res.diags.push_back({ln, m, true}); }
+    bool forced_now = false;  // the command line being read was written `$ cmd`
 
     void flush_heredocs() {
         for (auto& h : heredocs) {
@@ -708,6 +774,7 @@ struct Tx {
     void command(size_t from, bool value_mode) {
         int ln = line;
         CmdParser p(s, from, n, close_char(), file, ln, known, res);
+        p.inline_end = inline_kw;
         Line L;
         L.file = file;
         L.line = ln;
@@ -721,7 +788,12 @@ struct Tx {
             out += "nil";
             return;
         }
-        L.text = first_line(s.substr(from, p.i - from));
+        bool tail = p.tail != std::string::npos;
+        L.text = first_line(s.substr(from, (tail ? p.tail - (p.tail_colon ? 1 : 0) : p.i) - from));
+        if (tail) {  // the text shown in messages ends with the last command, not with || or &&
+            while (!L.text.empty() && (blank(L.text.back()) || L.text.back() == '|' || L.text.back() == '&')) L.text.pop_back();
+            value_mode = true;
+        }
         int idx = int(table().size());
         table().push_back(std::move(L));
         std::string call = std::string(p.do_block ? "__rsh_cd_do(" : "__rsh_cmd(") + std::to_string(idx) + ", [";
@@ -730,12 +802,20 @@ struct Tx {
         if (value_mode) call += ", true";
         call += ")";
         if (p.do_block) call += " do";
+        if (tail) call = "(" + call + (p.tail_or ? ") or " : ") and ") + (p.tail_colon ? "nil" : "");
         out += call;
         int pad = p.nl - count_nl(call);
         for (int k = 0; k < pad; ++k) out += '\n';
         line += p.nl;
         if (p.do_block) ++kw;
         res.marks.push_back({ln, 'C', table()[idx].text});
+        hints(table()[idx], ln);
+        if (tail) {  // Ruby goes on: `exit 1`, `raise "x" unless y`
+            i = p.tail;
+            stmt = false;
+            prev = p.tail_colon ? Value : Op;
+            return;
+        }
         i = p.i;
         if (p.do_block || (i > 0 && s[i - 1] == '\n')) {
             stmt = true;
@@ -744,6 +824,100 @@ struct Tx {
             stmt = false;
             prev = Value;
         }
+    }
+
+    // Warnings for -n and --lint about a command line that may have been meant as Ruby (0.1.4).
+    void hints(const Line& L, int ln) {
+        if (forced_now || L.items.empty() || L.items[0].pipeline.empty()) return;
+        const Cmd& c = L.items[0].pipeline[0];
+        if (c.words.empty() || !c.env.empty()) return;
+        auto plain = [](const Word& w) -> std::string {
+            return w.parts.size() == 1 && w.parts[0].k == Part::Pat ? w.parts[0].s : std::string();
+        };
+        std::string w0 = plain(c.words[0]);
+        if (w0.empty() || !ident_start(w0[0])) return;
+        std::string w1 = c.words.size() > 1 ? plain(c.words[1]) : "";
+        bool op = false;
+        for (const char* o : {"==", "!=", "<=>", "===", "=~", "!~", "+", "..", "...", "=>", "%", "**"}) op |= w1 == o;
+        bool single = L.items.size() == 1 && L.items[0].pipeline.size() == 1 && c.words.size() == 1 && c.redirs.empty();
+        if (frames.back() == 'G' && (single || op))  // audit R2-3: x = 1 + (y), total = (count + 1) * 2
+            warning(ln, "`" + w0 + "` inside ( ) is run as a command (a statement starts after a grouping `(`); if it is Ruby, write " + w0 +
+                            "() or declare it with rsh_methods :" + w0 + "; ($ " + w0 + " ...) says it is a command");
+        else if (op)  // audit R2-12: to_der == other.to_der, foo + 1
+            warning(ln, "`" + w1 + "` is the first argument of the command `" + w0 + "`; if this is a Ruby expression, write " + w0 +
+                            "() " + w1 + " ... or declare it with rsh_methods :" + w0);
+    }
+
+    // sh forms that are not rsh, at a statement start: a reader error that says what to write
+    // instead of the Ruby syntax error they gave (0.1.4, audit L-16, R2-20).
+    bool sh_hint() {
+        if (plain_rest || !regions.empty()) return false;
+        size_t e = s.find('\n', i);
+        if (e == std::string::npos) e = n;
+        std::string ln = s.substr(i, e - i);
+        auto starts = [&](const char* t) { return ln.compare(0, std::strlen(t), t) == 0; };
+        std::vector<std::string> tok;
+        for (size_t k = 0; k < ln.size();) {
+            while (k < ln.size() && blank(ln[k])) ++k;
+            size_t b = k;
+            while (k < ln.size() && !blank(ln[k])) ++k;
+            if (k > b) tok.push_back(ln.substr(b, k - b));
+        }
+        std::string why;
+        if ((starts("[ ") || starts("[[ ")) && tok.size() >= 3) {
+            bool closed = false, shape = false, comma = false;  // a Ruby Array has commas: [ "aix", $1 ]
+            for (size_t k = 1; k < tok.size(); ++k) {
+                const std::string& t = tok[k];
+                if (t == "]" || t == "]]" || t == "];" || t == "]];") closed = true;
+                if (!closed && t.find(',') != std::string::npos) comma = true;
+                if (!closed && (t == "=" || t == "!=" || t == "==" || t == "-eq" || t == "-ne" || t == "-lt" || t == "-le" ||
+                                t == "-gt" || t == "-ge" || t[0] == '$' || t.compare(0, 2, "\"$") == 0))
+                    shape = true;
+                if (k == 1 && t.size() >= 2 && t[0] == '-' && std::isalpha((unsigned char)t[1])) shape = true;
+            }
+            if (closed && shape && !comma)
+                why = "`[ ... ]` is sh: write the test in Ruby (File.file?(f), File.directory?(d), a == b, s.empty?) or run the program: test -f f";
+        } else if (ident_start(ln[0])) {
+            size_t k = 0;
+            while (k < ln.size() && ident_char(ln[k])) ++k;
+            std::string w = ln.substr(0, k);
+            if (ln.compare(k, 3, "=$(") == 0)
+                why = "`" + w + "=$(command)` is sh: write " + w + " = `command` (a capture; its status is in $?)";
+            else if (w == "for" && tok.size() >= 4 && tok[2] == "in" && (ln.find("; do") != std::string::npos || ln.find(";do") != std::string::npos))
+                why = "a sh for loop: write for " + tok[1] + " in list ... end (a list in Ruby: %w[a b], Dir.glob(\"*.txt\"), ARGV)";
+            else if (w == "case" && tok.size() >= 3 && tok.back() == "in")
+                why = "a sh case: write case " + tok[1] + " / when \"a\" then ... / end";
+            else if (w == "set" && tok.size() >= 2 && tok[1].size() >= 2 && (tok[1][0] == '-' || tok[1][0] == '+') &&
+                     std::isalpha((unsigned char)tok[1][1]) && command_at(i))
+                why = tok[1].find('x') != std::string::npos
+                          ? "`set " + tok[1] + "` is sh: rsh has no trace mode (rsh --explain shows how each line is read); it already stops at a failed command"
+                          : "`set " + tok[1] + "` is sh: rsh already stops at a failed command (relaxed! turns that off) and an unset $NAME is an error";
+            else if (w == "alias" && tok.size() >= 2 && tok[1].find('=') != std::string::npos && tok[1][0] != '=')
+                why = "`alias " + tok[1].substr(0, tok[1].find('=')) + "=...` is sh: write a method, def " + tok[1].substr(0, tok[1].find('=')) +
+                      "(*args) with the command line inside (#{args} passes the arguments), end";
+            else if ((w == "true" || w == "false") && tok.size() >= 4 && (tok[1] == "&&" || tok[1] == "||")) {
+                size_t q = ln.find(tok[1]) + 2;
+                while (q < ln.size() && blank(ln[q])) ++q;
+                size_t qe = q;
+                while (qe < ln.size() && ident_char(ln[qe])) ++qe;
+                bool arg = qe < ln.size() && blank(ln[qe]);
+                if (q < ln.size() && command_at(i + q) && arg)
+                    why = "`" + w + "` is Ruby's " + w + " here, so the line is Ruby: write the command alone, or $ " + w + " " + tok[1] + " ...";
+            }
+        } else if (starts(". ") && tok.size() >= 2) {
+            const std::string& f = tok[1];
+            bool file = f.find('/') != std::string::npos || f[0] == '$' || f[0] == '"';
+            for (const char* x : {".sh", ".rsh", ".rb", "rc", ".env"})
+                file |= f.size() > std::strlen(x) && f.compare(f.size() - std::strlen(x), std::strlen(x), x) == 0;
+            if (file) why = "`. " + f + "` is sh: write source " + f;
+        }
+        if (why.empty()) return false;
+        error(line, why);
+        out += "nil";
+        i = e;
+        stmt = false;
+        prev = Value;
+        return true;
     }
 
     // `...` or %x{...}: one command line, captured.
@@ -801,46 +975,66 @@ struct Tx {
         prev = Value;
     }
 
-    bool try_command() {
-        bool value_mode = cond || frames.back() == 'G';
-        bool forced = s[i] == '$' && i + 1 < n && blank(s[i + 1]);
-        if ((plain_rest || !regions.empty()) && !forced) return false;
-        if (forced) {
-            i += 2;
-            while (i < n && blank(s[i])) ++i;
-            command(i, value_mode);
+    // Does a command line start at `p`? The rule of docs/rsh.md, "How a line is read"; it looks only
+    // at the text. `at_bang` is set for `! cmd` (sh negation, audit M-4): the word after `!` decides.
+    bool command_at(size_t p, bool at_bang = false) const {
+        if (s.compare(p, 2, "./") == 0 || s.compare(p, 3, "../") == 0 ||
+            (s[p] == '~' && p + 1 < n && (s[p + 1] == '/' || ident_start(s[p + 1]))))
             return true;
-        }
-        if (at("./") || at("../") || (s[i] == '~' && i + 1 < n && (s[i + 1] == '/' || ident_start(s[i + 1])))) {
-            command(i, value_mode);
-            return true;
-        }
-        if (s[i] == '/' && i + 1 < n && (ident_char(s[i + 1]) || s[i + 1] == '.')) {
-            size_t e = i;
+        if (s[p] == '/' && p + 1 < n && (ident_char(s[p + 1]) || s[p + 1] == '.')) {
+            size_t e = p;
             while (e < n && !blank(s[e]) && s[e] != '\n') ++e;
-            std::string w = s.substr(i, e - i);
-            if (w.back() != '/' && w.find("/.") == std::string::npos && w.find("=~") == std::string::npos) {
-                command(i, value_mode);
-                return true;
-            }
-            return false;
+            std::string w = s.substr(p, e - p);
+            return w.back() != '/' && w.find("/.") == std::string::npos && w.find("=~") == std::string::npos;
         }
-        if (!ident_start(s[i])) return false;
-        size_t j = i;
+        if (!at_bang && s[p] == '!' && p + 1 < n && blank(s[p + 1])) {
+            size_t k = p + 1;
+            while (k < n && blank(s[k])) ++k;
+            return k < n && s[k] != '\n' && command_at(k, true);
+        }
+        if (!ident_start(s[p])) return false;
+        size_t j = p;
         while (j < n && ident_char(s[j])) ++j;
-        std::string w = s.substr(i, j - i);
+        std::string w = s.substr(p, j - p);
         if (j < n && (s[j] == '?' || s[j] == '!')) return false;
         if (is_keyword(w)) return false;
         if (std::isupper((unsigned char)w[0])) {
-            // NAME=value command ...
+            // NAME=value command ...: the value is one shell word and a command word follows it
+            // (0.1.4: `P=Struct.new(:x) do`, `P=1; puts 1`, `P=f(1) + 2` are Ruby, audit R2-4).
             if (j < n && s[j] == '=' && j + 1 < n && !std::strchr("=~ \t\n", s[j + 1])) {
-                size_t k = j;
-                while (k < n && !blank(s[k]) && s[k] != '\n') ++k;
-                while (k < n && blank(s[k])) ++k;
-                if (k < n && s[k] != '\n' && s[k] != '#' && s[k] != ';') {
-                    command(i, value_mode);
-                    return true;
+                size_t k = j + 1;
+                char q = 0;
+                for (; k < n && (q || (!blank(s[k]) && s[k] != '\n')); ++k) {
+                    char c = s[k];
+                    if (q) {
+                        if (c == '\\' && q == '"') ++k;
+                        else if (c == q) q = 0;
+                        continue;
+                    }
+                    if (c == '"' || c == '\'') q = c;
+                    else if (c == '\\') ++k;
+                    else if (c == '$' && k + 1 < n && s[k + 1] == '{') {
+                        size_t e = s.find('}', k);
+                        if (e == std::string::npos) return false;
+                        k = e;
+                    } else if (c == '#' && k + 1 < n && s[k + 1] == '{') {
+                        size_t e = match_brace(s, k + 2, n);
+                        if (e == std::string::npos) return false;
+                        k = e;
+                    } else if (std::strchr("()[]{};", c) || (c == ':' && k + 1 < n && s[k + 1] == ':'))
+                        return false;
                 }
+                if (q) return false;
+                while (k < n && blank(s[k])) ++k;
+                if (k >= n || s[k] == '\n' || s[k] == '#' || s[k] == ';') return false;
+                if (s[k] == '$' && k + 1 < n && blank(s[k + 1])) return true;
+                if (!ident_start(s[k]) && !std::strchr("./~\"'", s[k])) return false;
+                if (ident_start(s[k])) {
+                    size_t e = k;
+                    while (e < n && ident_char(s[e])) ++e;
+                    if (is_keyword(s.substr(k, e - k))) return false;  // P=x if y, P=x rescue nil
+                }
+                return true;
             }
             return false;
         }
@@ -850,7 +1044,38 @@ struct Tx {
         size_t k = j;
         while (k < n && blank(s[k])) ++k;
         if (s.compare(k, 2, "do") == 0 && (k + 2 >= n || !ident_char(s[k + 2]))) return false;
-        if (k < n && s[k] == '{') return false;
+        // `foo { ... }` is a block; `echo {a,b}` is a word with a brace pattern (0.1.4, audit M-1):
+        // a `,` inside, no blank, no `|` after the `{`, closed on the same line.
+        if (k < n && s[k] == '{' && !brace_word(k)) return false;
+        return true;
+    }
+    bool brace_word(size_t k) const {
+        if (k + 1 >= n || blank(s[k + 1]) || s[k + 1] == '|' || s[k + 1] == '}' || s[k + 1] == '\n') return false;
+        int depth = 0;
+        bool comma = false;
+        for (size_t e = k; e < n; ++e) {
+            char c = s[e];
+            if (blank(c) || c == '\n' || c == '"' || c == '\'') return false;
+            if (c == '{') ++depth;
+            else if (c == '}' && --depth == 0) return comma;
+            else if (c == ',' && depth == 1) comma = true;
+        }
+        return false;
+    }
+
+    bool try_command() {
+        bool value_mode = cond || frames.back() == 'G';
+        bool forced = s[i] == '$' && i + 1 < n && blank(s[i + 1]);
+        if ((plain_rest || !regions.empty()) && !forced) return false;
+        if (forced) {
+            i += 2;
+            while (i < n && blank(s[i])) ++i;
+            forced_now = true;
+            command(i, value_mode);
+            forced_now = false;
+            return true;
+        }
+        if (!command_at(i)) return false;
         command(i, value_mode);
         return true;
     }
@@ -902,6 +1127,7 @@ struct Tx {
                 rescue_line = false;
                 loop_do = false;
                 pending_ruby = false;
+                inline_kw = false;
                 continue;
             }
             bool sp = space;
@@ -921,7 +1147,7 @@ struct Tx {
                 prev = Start;
                 continue;
             }
-            if ((stmt || cond) && !interp && try_command()) {
+            if ((stmt || cond) && !interp && (sh_hint() || try_command())) {
                 cond = false;
                 continue;
             }
@@ -1017,7 +1243,19 @@ struct Tx {
                             if (!endless) ++kw;
                         }
                         size_t e = s.find('\n', k);
-                        record_idents(s.substr(k, (e == std::string::npos ? n : e) - k));
+                        std::string params = s.substr(k, (e == std::string::npos ? n : e) - k);
+                        {  // `def f; body; end` on one line: the parameters end at the first `;`
+                            int d = 0;
+                            for (size_t q = 0; q < params.size(); ++q) {
+                                if (params[q] == '(') ++d;
+                                else if (params[q] == ')') --d;
+                                else if (params[q] == ';' && d <= 0) {
+                                    params.resize(q);
+                                    break;
+                                }
+                            }
+                        }
+                        record_idents(params);
                         copy(k);
                         prev = Value;
                     } else if (w == "if" || w == "unless" || w == "while" || w == "until" || w == "elsif") {
@@ -1026,10 +1264,12 @@ struct Tx {
                     } else if (w == "then" || w == "else" || w == "begin" || w == "ensure") {
                         prev = Start;
                         stmt = true;
+                        inline_kw = true;
                     } else if (w == "do") {
                         block_params();
                         prev = Start;
                         stmt = true;
+                        inline_kw = true;
                     } else if (w == "for") {
                         size_t k = i;
                         while (k < n && blank(s[k])) ++k;

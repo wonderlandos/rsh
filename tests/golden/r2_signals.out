@@ -1,0 +1,13 @@
+trap USR1 ran
+trap USR2 got 12
+15
+14
+unsupported signal 'SIGNOSUCH'
+true
+HUP ignored
+SIGTERM 15
+true
+at_exit 2 (runs first)
+at_exit 1 (runs last)
+trap EXIT runs after at_exit
+status: 4

@@ -1,0 +1,39 @@
+mode: shell
+methods: h sum w x y
+   1 R  # 0.1.4: reader fixes (audits R2-4, M-1, M-4, M-8, L-3).
+   2 R  # A Capital NAME=value with Ruby after it is Ruby (R2-4)
+   3 R  Point=Struct.new(:x, :y) do
+   4 R    def sum = x + y
+   5 R  end
+   6 R  puts Point.new(1, 2).sum
+   7 R  Size=Data.define(:w, :h); s = Size.new(w: 3, h: 4); puts s.w * s.h
+   8 R  Limit=10; puts Limit
+   9 R  Total=Limit + 5 if true
+  10 R  puts Total
+  11 R  # ... and NAME=value command stays a command line
+  12 C  GREETING=hello sh -c 'echo $GREETING'
+  13 C  QUOTED="a b" sh -c 'echo "[$QUOTED]"'
+  14 R  # brace patterns as the first argument (M-1); a block stays a block
+  15 C  echo {a,b}
+  16 C  echo {x,y}.txt z
+  17 R  [1].each { |n| puts "block #{n}" }
+  18 R  # ! cmd: sh negation (M-4)
+  19 C  ! test -e /no/such/file
+  20 R  puts "negated: #{$?.exitstatus}"
+  21 C  if ! test -e /no/such/file
+  22 R    puts "if ! works"
+  23 R  end
+  24 R  n = 0
+  25 C  until ! test #{n} -lt 2
+  26 R    n += 1
+  27 R  end
+  28 R  puts "until ! ended at #{n}"
+  29 R  # `end` after then/else/do on one line closes the Ruby construct (M-8)
+  30 C  if ARGV.empty? then echo no arguments end
+  31 C  if ARGV.empty? then echo first else echo second end
+  32 C  [1, 2].each do |k| echo item #{k} end
+  33 C  echo the end
+  34 R  # $$ is the process id (L-3)
+  35 X  pid = `echo $$`.chomp
+  36 R  puts pid == Process.pid.to_s
+  37    

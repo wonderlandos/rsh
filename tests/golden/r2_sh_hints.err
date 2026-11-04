@@ -1,0 +1,10 @@
+rsh: golden/r2_sh_hints.rsh:2: `[ ... ]` is sh: write the test in Ruby (File.file?(f), File.directory?(d), a == b, s.empty?) or run the program: test -f f
+rsh: golden/r2_sh_hints.rsh:3: `[ ... ]` is sh: write the test in Ruby (File.file?(f), File.directory?(d), a == b, s.empty?) or run the program: test -f f
+rsh: golden/r2_sh_hints.rsh:4: `out=$(command)` is sh: write out = `command` (a capture; its status is in $?)
+rsh: golden/r2_sh_hints.rsh:5: a sh for loop: write for f in list ... end (a list in Ruby: %w[a b], Dir.glob("*.txt"), ARGV)
+rsh: golden/r2_sh_hints.rsh:6: a sh case: write case $1 / when "a" then ... / end
+rsh: golden/r2_sh_hints.rsh:7: `set -eu` is sh: rsh already stops at a failed command (relaxed! turns that off) and an unset $NAME is an error
+rsh: golden/r2_sh_hints.rsh:8: `alias ll=...` is sh: write a method, def ll(*args) with the command line inside (#{args} passes the arguments), end
+rsh: golden/r2_sh_hints.rsh:9: `. ./lib.sh` is sh: write source ./lib.sh
+rsh: golden/r2_sh_hints.rsh:10: `true` is Ruby's true here, so the line is Ruby: write the command alone, or $ true && ...
+rsh: golden/r2_sh_hints.rsh:12: a command is missing after |

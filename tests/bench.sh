@@ -1,6 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
-# rsh start-up and size: N runs of `rsh -c nil` and of a one-line script; median and p95 in ms.
+# rsh start-up and size: N runs of `rsh -c nil`, of `rsh -c 'echo x'` (a builtin, no fork since
+# 0.1.4) and of a one-line script; median and p95 in ms. The speed and memory table on long texts
+# is bench/run.sh.
 # Usage: sh tests/bench.sh path/to/rsh [runs]
 set -eu
 rsh=$1
@@ -23,5 +25,7 @@ measure() {
 printf 'size     %s bytes\n' "$(wc -c <"$rsh")"
 printf 'rsh -c nil       '
 measure "$rsh" -c nil
+printf "rsh -c 'echo x'  "
+measure "$rsh" -c 'echo x'
 printf 'one-line script  '
 measure "$rsh" "$tmp/one.rsh"

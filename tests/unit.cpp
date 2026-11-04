@@ -75,6 +75,77 @@ static std::vector<std::string> argv_of(const std::string& text, std::vector<Val
 }
 
 // The 0.1.3 fixes (docs/STABILITY.md; audit ids in the comments).
+// 0.1.4 (QA-100 round 2): the reader fixes and the completion words.
+static void test_r2() {
+    // R2-4: a Capital NAME= glued to Ruby is Ruby; NAME=value command stays a command line.
+    CHECK(kinds("P=Struct.new(:x) do\nend") == "RR");
+    CHECK(kinds("P=1; puts 1") == "R");
+    CHECK(kinds("P=f(1) + 2") == "R");
+    CHECK(kinds("P=Foo::Bar.new(1); x = 1") == "R");
+    CHECK(kinds("P=x if true") == "R");
+    CHECK(is_cmd("X=1 env"));
+    CHECK(is_cmd("X=\"a b\" env"));
+    CHECK(is_cmd("X=${HOME}/x env"));
+    // M-1: a brace pattern as the first argument; a block stays a block.
+    CHECK(is_cmd("echo {a,b}"));
+    CHECK(is_cmd("touch {a,b}.txt"));
+    CHECK(kinds("foo { |x| x }") == "R");
+    CHECK(kinds("foo {|x| x }") == "R");
+    CHECK(kinds("foo { a, b }") == "R");
+    // M-4: ! cmd; !x glued and ! of a Ruby value stay Ruby.
+    CHECK(is_cmd("! grep -q x f"));
+    CHECK(is_cmd("if ! grep -q x f\nend") == false && kinds("if ! grep -q x f\nend") == "CR");
+    CHECK(kinds("!x") == "R");
+    CHECK(kinds("x = 1\n! x") == "RR");
+    CHECK(kinds("! File.exist?(f)") == "R");
+    // R2-7: a Ruby control word after && or || ends the command line.
+    {
+        Result r = tx("ls /x || exit 1");
+        CHECK(r.ok() && r.ruby.find(") or exit 1") != std::string::npos);
+        r = tx("ls /x && return");
+        CHECK(r.ok() && r.ruby.find(") and return") != std::string::npos);
+        r = tx("ls /x || :");
+        CHECK(r.ok() && r.ruby.find(") or nil") != std::string::npos);
+        CHECK(err("ls /x || (exit 1)").find("after && or || write the Ruby itself") != std::string::npos);
+        CHECK(err("cat <<EOF || exit 1\nx\nEOF").find("here-document") != std::string::npos);
+    }
+    // M-2: a | with nothing after it.
+    CHECK(err("echo a |") == "a command is missing after |");
+    CHECK(is_cmd("echo a |\n  cat") == false && kinds("echo a |\n  cat") == "CR");
+    // M-8: end after then on one line.
+    CHECK(tx("if ARGV.empty? then echo a end").ok() && tx("[1].each do |k| echo #{k} end").ok());
+    // L-16, R2-20: sh forms are reader errors that say what to write.
+    CHECK(err("[ -f x ] && echo y").find("`[ ... ]` is sh") == 0);
+    CHECK(err("x=$(ls)").find("is sh: write x = `command`") != std::string::npos);
+    CHECK(err("set -e").find("`set -e` is sh") == 0);
+    CHECK(err("true && echo hi").find("`true` is Ruby's true here") == 0);
+    CHECK(err("x = [ -1, 2 ]").empty());
+    CHECK(err("x = case os\nwhen /aix/ then [ \"aix\", $1 ]\nend").empty());
+    CHECK(err("true && puts(1)").empty());
+    // R2-3, R2-12: warnings, not errors.
+    {
+        Result r = tx("x = 1 + (y)");
+        CHECK(r.ok() && r.diags.size() == 1 && r.diags[0].warning);
+        r = tx("to_der == other");
+        CHECK(r.ok() && r.diags.size() == 1 && r.diags[0].warning);
+        r = tx("ok = (git diff --quiet)");
+        CHECK(r.ok() && r.diags.empty());
+    }
+    // M-7, R2-15, R2-16: completion words.
+    CHECK(quote_word("sp ace") == "sp\\ ace");
+    CHECK(quote_word("quo'te") == "quo\\'te");
+    CHECK(quote_word("d$x*#") == "d\\$x\\*\\#");
+    CHECK(quote_word("tab\tname") == "'tab\tname'");
+    CHECK(quote_word("a'\nb") == "'a'\\''\nb'");
+    CHECK(quote_word("~/x") == "\\~/x" && quote_word("~/x", true) == "~/x");
+    CHECK(quote_word("bad\xffname") == "bad\xffname");
+    CHECK(unquote_word("sp\\ a") == "sp a" && unquote_word("'sp a") == "sp a" && unquote_word("\"a\\$b") == "a$b");
+    CHECK(word_start("cat sp\\ a", 10) == 4);
+    CHECK(word_start("cat 'sp a", 9) == 4);
+    CHECK(word_start("cat a|ca", 8) == 6);
+    CHECK(word_start("cat a > di", 10) == 8);
+}
+
 static void test_audit() {
     // H2: a NUL byte in a value is an error, as an argument, in a word, in an Array.
     {
@@ -388,6 +459,7 @@ int main() {
     CHECK(std::system(rm.c_str()) == 0);
 
     test_audit();
+    test_r2();
 
     std::printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

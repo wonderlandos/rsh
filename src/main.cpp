@@ -4,7 +4,9 @@
 // first line `# rsh: ruby` turns it off (plain Ruby). See rsh(1) and docs/rsh.md.
 #include <dirent.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <cctype>
@@ -17,9 +19,253 @@
 #include "exec.hpp"
 #include "rt.hpp"
 
+#include <mruby.h>
+#include <mruby/compile.h>
+#include <mruby/error.h>
+#include <mruby/irep.h>
+#include <mruby/proc.h>
+#include <mruby/dump.h>
+#include <mruby/variable.h>
+
 using namespace rsh;
 
+extern "C" const uint8_t rsh_prelude_more[];
+
 namespace {
+
+// ---- signals, trap and at_exit (0.1.4, audit H-2) ----------------------------------------------
+// A handler only notes the signal; the Ruby side acts on it at its next safe point (src/prelude.rb,
+// Rsh.__signals): a trap block runs, or TERM, HUP and INT with no trap raise SignalException or
+// Interrupt so ensure clauses and at_exit blocks run, and rsh then ends by that signal. Code that
+// reaches no safe point (a `while true` with no command in it) is ended by the signal itself
+// after 2 seconds, or at once on a second one, as before.
+namespace sig {
+constexpr int N = 65;
+volatile sig_atomic_t pend[N];
+volatile sig_atomic_t mode[N];  // 0 rsh's own, 1 ignored, 2 a Ruby block
+volatile sig_atomic_t any = 0;
+volatile sig_atomic_t watch = 0;     // the signal the 2-second watchdog will finish
+volatile sig_atomic_t soft_int = 0;  // interactive: Ctrl-C interrupts the Ruby code, not the shell
+volatile sig_atomic_t first_at = 0;  // when the pending one came (seconds, monotonic)
+int died = 0;                        // the signal that ended the script (rsh ends by it too)
+
+void handle(int s);
+void finish(int s) {
+    signal(s, SIG_DFL);
+    sigset_t m;
+    sigemptyset(&m);
+    sigaddset(&m, s);
+    sigprocmask(SIG_UNBLOCK, &m, nullptr);
+    raise(s);
+}
+void on_signal(int s) {
+    if (s <= 0 || s >= N) return;
+    if (s == SIGALRM && watch) {
+        finish(watch);
+        return;
+    }
+    bool soft = mode[s] == 2 || (s == SIGINT && soft_int);
+    timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    // Another one a second or more later while the first is still not taken: now. (One sent to the
+    // process and to its group, as timeout(1) does, arrives twice at once and counts once.)
+    if (!soft && pend[s] && now.tv_sec - first_at >= 1) {
+        finish(s);
+        return;
+    }
+    // Waiting for a command: it gets TERM or HUP too, or the shell would sit until the 2-second
+    // watchdog (the command is not in the shell's process group when it has job control).
+    if ((s == SIGTERM || s == SIGHUP) && mode[s] == 0) forward_to_foreground(s);
+    if (!pend[s]) first_at = sig_atomic_t(now.tv_sec);
+    pend[s] = 1;
+    any = 1;
+    if (!soft && !watch) {
+        watch = s;
+        handle(SIGALRM);  // installed now, not at start-up (it is async-signal-safe)
+        alarm(2);
+    }
+}
+void handle(int s) {
+    struct sigaction a {};
+    a.sa_handler = on_signal;
+    sigemptyset(&a.sa_mask);
+    a.sa_flags = SA_RESTART;
+    sigaction(s, &a, nullptr);
+}
+void set_disposition(int s, void (*h)(int)) {
+    struct sigaction a {};
+    a.sa_handler = h;
+    sigemptyset(&a.sa_mask);
+    sigaction(s, &a, nullptr);
+}
+// A script: TERM, HUP and INT end it through Ruby. One its parent ignores stays ignored (nohup,
+// a background job of a shell without job control), as sh does.
+void install_script() {
+    // One system call each (start-up pays for every one): set ours, and put the old ignore back.
+    for (int s : {SIGTERM, SIGHUP, SIGINT}) {
+        struct sigaction a {}, old {};
+        a.sa_handler = on_signal;
+        sigemptyset(&a.sa_mask);
+        a.sa_flags = SA_RESTART;
+        sigaction(s, &a, &old);
+        if (old.sa_handler == SIG_IGN) {
+            mode[s] = 1;
+            sigaction(s, &old, nullptr);
+        }
+    }
+}
+// Interactive: while a line runs, and back to the prompt's own settings after it.
+void eval_begin() {
+    soft_int = 1;
+    for (int s : {SIGTERM, SIGHUP, SIGINT})
+        if (mode[s] != 1) handle(s);
+    handle(SIGALRM);
+}
+void eval_end() {
+    for (int s : {SIGTERM, SIGHUP})
+        if (mode[s] == 0) set_disposition(s, SIG_DFL);
+    if (mode[SIGINT] != 2) set_disposition(SIGINT, SIG_IGN);
+    pend[SIGINT] = 0;
+}
+bool interactive_session = false;
+
+mrb_value m_sigp(mrb_state*, mrb_value) { return mrb_bool_value(any != 0); }
+mrb_value m_sig_take(mrb_state*, mrb_value) {
+    any = 0;
+    int got = 0;
+    for (int s = 1; s < N; ++s)
+        if (pend[s]) {
+            if (got) {
+                any = 1;
+                break;
+            }
+            got = s;
+            pend[s] = 0;
+            if (watch == s) {
+                alarm(0);
+                watch = 0;
+            }
+        }
+    return mrb_fixnum_value(got);
+}
+mrb_value m_trap(mrb_state* mrb, mrb_value) {
+    mrb_int n, m;
+    mrb_get_args(mrb, "ii", &n, &m);
+    if (n <= 0 || n >= N || n == SIGKILL || n == SIGSTOP) return mrb_nil_value();
+    int s = int(n);
+    mode[s] = sig_atomic_t(m);
+    bool own = s == SIGTERM || s == SIGHUP || s == SIGINT;
+    if (m == 1) set_disposition(s, SIG_IGN);
+    else if (m == 2) handle(s);
+    else if (own && !interactive_session) handle(s);
+    else if (s == SIGINT) set_disposition(s, SIG_IGN);  // the prompt ignores it
+    else set_disposition(s, SIG_DFL);
+    if (s == SIGALRM && m != 1) handle(SIGALRM);  // the watchdog needs it
+    pend[s] = 0;
+    return mrb_nil_value();
+}
+// The exception for a signal with no trap: Interrupt or SignalException, marked as an exit with
+// status 128+N (no message; rsh then ends by the signal) except Ctrl-C at the interactive prompt.
+mrb_value m_signal_exc(mrb_state* mrb, mrb_value) {
+    mrb_int n;
+    mrb_get_args(mrb, "i", &n);
+    bool intr = n == SIGINT;
+    mrb_value arg = intr ? mrb_str_new_lit(mrb, "") : mrb_fixnum_value(n);
+    mrb_value exc = mrb_obj_new(mrb, mrb_class_get(mrb, intr ? "Interrupt" : "SignalException"), 1, &arg);
+    if (!(intr && soft_int)) {
+        mrb_exc_ptr(exc)->flags |= MRB_EXC_EXIT;
+        mrb_iv_set(mrb, exc, mrb_intern_lit(mrb, "status"), mrb_fixnum_value(128 + n));
+        died = int(n);
+    }
+    return exc;
+}
+mrb_value m_home_self(mrb_state* mrb, mrb_value) {
+    std::string h = home_of_uid(geteuid());
+    return h.empty() ? mrb_nil_value() : mrb_str_new(mrb, h.data(), h.size());
+}
+mrb_value m_ppid(mrb_state*, mrb_value) { return mrb_fixnum_value(getppid()); }
+// SystemExit#status and #success? (the built-in interpreter keeps the status but has no method).
+mrb_value m_exit_status(mrb_state* mrb, mrb_value self) {
+    mrb_value v = mrb_iv_get(mrb, self, mrb_intern_lit(mrb, "status"));
+    return mrb_integer_p(v) ? v : mrb_fixnum_value(0);
+}
+mrb_value m_exit_success(mrb_state* mrb, mrb_value self) {
+    mrb_value v = m_exit_status(mrb, self);
+    return mrb_bool_value(mrb_integer(v) == 0);
+}
+}  // namespace sig
+
+// src/prelude_more.rb, the first time Signal, trap, at_exit, Dir.home or Process.kill is used.
+bool more_loaded = false;
+mrb_value m_more(mrb_state* mrb, mrb_value) {
+    if (more_loaded) return mrb_nil_value();
+    more_loaded = true;
+    // At the top level, as src/prelude.rb is (mrb_load_irep would take the caller's class as the
+    // place for definitions: `class Dir` and `module Kernel` would nest in the caller).
+    mrb_irep* irep = mrb_read_irep(mrb, rsh_prelude_more);
+    if (!irep) mrb_raise(mrb, E_SCRIPT_ERROR, "rsh: src/prelude_more.rb did not load");
+    RProc* proc = mrb_proc_new(mrb, irep);
+    mrb_irep_decref(mrb, irep);
+    MRB_PROC_SET_TARGET_CLASS(proc, mrb->object_class);
+    mrb_top_run(mrb, proc, mrb_top_self(mrb), 0);
+    if (mrb->exc) {
+        mrb_value e = mrb_obj_value(mrb->exc);
+        mrb->exc = nullptr;
+        mrb_exc_raise(mrb, e);
+    }
+    return mrb_nil_value();
+}
+
+// What the program adds to the interpreter rt_open made (the prelude has stand-ins for these).
+void program_methods(mrb_state* mrb) {
+    RClass* r = mrb_module_get(mrb, "Rsh");
+    mrb_define_module_function(mrb, r, "__more", m_more, MRB_ARGS_NONE());
+    mrb_define_module_function(mrb, r, "__sigp", sig::m_sigp, MRB_ARGS_NONE());
+    mrb_define_module_function(mrb, r, "__sig_take", sig::m_sig_take, MRB_ARGS_NONE());
+    mrb_define_module_function(mrb, r, "__trap", sig::m_trap, MRB_ARGS_REQ(2));
+    mrb_define_module_function(mrb, r, "__signal_exc", sig::m_signal_exc, MRB_ARGS_REQ(1));
+    mrb_define_module_function(mrb, r, "__home_self", sig::m_home_self, MRB_ARGS_NONE());
+    mrb_define_module_function(mrb, r, "__ppid", sig::m_ppid, MRB_ARGS_NONE());
+    RClass* se = mrb_class_get(mrb, "SystemExit");
+    mrb_define_method(mrb, se, "status", sig::m_exit_status, MRB_ARGS_NONE());
+    mrb_define_method(mrb, se, "success?", sig::m_exit_success, MRB_ARGS_NONE());
+}
+
+// --explain and -n agree (0.1.4, audit R2-18): the Ruby text is compiled too; its errors are
+// printed as -n prints them. Returns 2 when there are any.
+int compile_errors(const std::string& ruby, const std::string& file) {
+    mrb_state* mrb = mrb_open();
+    if (!mrb) return 0;
+    mrb_ccontext* c = mrb_ccontext_new(mrb);
+    mrb_ccontext_filename(mrb, c, file.c_str());
+    c->capture_errors = TRUE;
+    c->no_exec = TRUE;
+    int bad = 0;
+    mrb_parser_state* p = mrb_parse_nstring(mrb, ruby.data(), ruby.size(), c);
+    if (!p) bad = 2;
+    else {
+        for (size_t e = 0; e < p->nerr && e < 10; ++e) {
+            std::fprintf(stderr, "%s:%d:%d: %s\n", file.c_str(), p->error_buffer[e].lineno, p->error_buffer[e].column,
+                         p->error_buffer[e].message ? p->error_buffer[e].message : "syntax error");
+            bad = 2;
+        }
+        mrb_parser_free(p);
+    }
+    mrb_ccontext_free(mrb, c);
+    mrb_close(mrb);
+    return bad;
+}
+
+// The at_exit blocks (and a trap("EXIT") block); returns the status the program ends with.
+int run_at_exit(mrb_state* mrb, int status) {
+    if (!more_loaded) return status;  // no at_exit or trap was ever called
+    mrb_value v = mrb_funcall(mrb, mrb_obj_value(mrb_module_get(mrb, "Rsh")), "__run_at_exit", 1, mrb_fixnum_value(status));
+    if (mrb->exc) {
+        mrb->exc = nullptr;
+        return status;
+    }
+    return mrb_integer_p(v) ? int(mrb_integer(v)) : status;
+}
 
 const char* USAGE =
     "usage: rsh [options] [file [arguments]]\n"
@@ -187,11 +433,14 @@ std::string paint(const std::string& line) {
 }
 
 std::vector<std::string> complete(const std::string& line, size_t start) {
-    std::string word = line.substr(start);
+    std::string typed = line.substr(start);
+    std::string word = unquote_word(typed);
     std::set<std::string> c;
-    bool first = true;
-    for (size_t k = 0; k < start; ++k)
-        if (line[k] != ' ' && line[k] != '\t') first = false;
+    // A command word: at the start, or after | ; & && || ( (0.1.4, R2-15).
+    size_t b = start;
+    while (b > 0 && (line[b - 1] == ' ' || line[b - 1] == '\t')) --b;
+    bool first = b == 0 || std::strchr("|;&(", line[b - 1]);
+    if (b >= 2 && line.compare(b - 2, 2, "$ ") == 0) first = true;
     if (first && word.find('/') == std::string::npos) {
         for (const char* b : {"cd", "pushd", "popd", "dirs", "export", "unset", "exec", "umask", "jobs", "fg", "bg", "wait",
                               "source", "echo", "type", "pwd", "history"})
@@ -236,7 +485,8 @@ std::vector<std::string> complete(const std::string& line, size_t start) {
             std::string full = (dir == "/" ? "/" : dir + "/") + x->d_name;
             struct stat st;
             bool isdir = stat(full.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
-            c.insert(shown_dir + x->d_name + (isdir ? "/" : ""));
+            // Inserted as one word of the line: `sp ace` becomes sp\ ace (M-7, R2-16).
+            c.insert(quote_word(shown_dir, true) + quote_word(x->d_name) + (isdir ? "/" : ""));
         }
         closedir(d);
     }
@@ -253,12 +503,53 @@ std::string short_cwd(const std::string& h) {
 
 // Root, or a set-user-id start: the person's environment ($HOME, $XDG_*) may point into another
 // person's files (sudo -E, su without -), so it is not used for init.rsh and history (audit H3).
+// The text of a script as the reader takes it (0.1.4): a UTF-8 byte-order mark at the start is
+// dropped (editors on Windows write one; it hid `# rsh: ruby`, audit R2-6) and every CR LF is LF,
+// as Ruby reads its source (a here-document end word and a `\` at a line end work, audit R2-5).
+std::string source_text(std::string s) {
+    if (s.compare(0, 3, "\xEF\xBB\xBF") == 0) s.erase(0, 3);
+    if (s.find("\r\n") == std::string::npos) return s;
+    std::string o;
+    o.reserve(s.size());
+    for (size_t k = 0; k < s.size(); ++k)
+        if (!(s[k] == '\r' && k + 1 < s.size() && s[k + 1] == '\n')) o += s[k];
+    return o;
+}
+
+// `# rsh: WORD` as the mode comment (the first line, or the one after #!) with a WORD that is not
+// ruby or shell: a typo there silently gave the shell layer to a file meant as plain Ruby (M-12).
+// Returns the line number of such a comment, else 0; `word` gets the word.
+int unknown_mode(const std::string& src, std::string& word) {
+    size_t b = 0;
+    for (int n = 0; n < 2 && b < src.size(); ++n) {
+        size_t e = src.find('\n', b);
+        if (e == std::string::npos) e = src.size();
+        std::string line = src.substr(b, e - b);
+        while (!line.empty() && (line.back() == ' ' || line.back() == '\t')) line.pop_back();
+        if (n == 0 && line.compare(0, 2, "#!") == 0) {
+            b = e + 1;
+            continue;
+        }
+        if (line.compare(0, 1, "#") != 0) return 0;
+        size_t k = 1;
+        while (k < line.size() && (line[k] == ' ' || line[k] == '\t')) ++k;
+        if (line.compare(k, 4, "rsh:") != 0) return 0;
+        k += 4;
+        while (k < line.size() && (line[k] == ' ' || line[k] == '\t')) ++k;
+        word = line.substr(k);
+        return word == "ruby" || word == "shell" ? 0 : n + 1;
+    }
+    return 0;
+}
+
 bool privileged() { return geteuid() == 0 || geteuid() != getuid() || getegid() != getgid(); }
 
 int interactive() {
     setup_interactive();
     mrb_state* mrb = rt_open("rsh", {});
     if (!mrb) return 70;
+    program_methods(mrb);
+    sig::interactive_session = true;
     const bool strict = privileged();
     std::string home = strict ? home_of_uid(geteuid()) : home_of("");
     if (home.empty()) home = "/";
@@ -277,7 +568,9 @@ int interactive() {
             ssize_t n;
             while ((n = read(fd, b, sizeof b)) > 0) src.append(b, size_t(n));
             close(fd);
+            sig::eval_begin();
             rt_run(mrb, src, init, true);
+            sig::eval_end();
         } else if (!why.empty())
             std::fprintf(stderr, "rsh: not running %s: %s\n", printable(init).c_str(), why.c_str());
     }
@@ -294,12 +587,22 @@ int interactive() {
         else if (!why.empty()) std::fprintf(stderr, "rsh: history is not kept in a file this time: %s: %s\n", printable(state + "/rsh").c_str(), why.c_str());
     }
     ed.load();
+    // `history` lists the entries of earlier sessions too, then this one's (audit M-9).
+    for (auto& e : ed.history) rt_add_history(e);
     ed.paint = paint;
     ed.complete = complete;
     Known known;
     repl_known = &known;
     std::string buf;
     int status = 0;
+    bool warned_jobs = false;  // exit or Ctrl-D with jobs running: said once, the second one leaves
+    auto jobs_left = [&] {
+        report_jobs();
+        if (warned_jobs || running_jobs() == 0) return false;
+        warned_jobs = true;
+        std::fprintf(stderr, "rsh: there are jobs still running (jobs lists them); exit again to leave them\n");
+        return true;
+    };
     for (;;) {
         report_jobs();
         std::string prompt;
@@ -313,22 +616,31 @@ int interactive() {
                 buf.clear();
                 continue;
             }
+            if (isatty(0) && jobs_left()) continue;
             break;
         }
         buf += line + "\n";
         bool exited, incomplete;
+        sig::eval_begin();
         int st = rt_eval(mrb, buf, known, exited, incomplete);
+        sig::eval_end();
         if (incomplete) continue;
         std::string entry = buf.substr(0, buf.size() - 1);
+        size_t had = ed.history.size();
         ed.add(entry);
-        if (!keep_out_of_history(entry)) rt_add_history(entry);
+        if (ed.history.size() > had) rt_add_history(entry);
         buf.clear();
         status = st;
+        if (exited && !sig::died && isatty(0) && jobs_left()) continue;
         if (exited) {
+            st = run_at_exit(mrb, st);
+            int died = sig::died;
             rt_close(mrb);
+            if (died && st == 128 + died) sig::finish(died);
             return st;
         }
     }
+    status = run_at_exit(mrb, status);
     rt_close(mrb);
     return status;
 }
@@ -360,6 +672,9 @@ int main(int argc, char** argv) {
         } else if (a == "-h" || a == "--help") {
             std::fputs(USAGE, stdout);
             return 0;
+        } else if (a == "-c" || a == "-e" || a == "--name") {  // the last word: its value is missing (L-8)
+            std::fprintf(stderr, "rsh: %s needs %s\n%s", a.c_str(), a == "--name" ? "a FILE" : "TEXT", USAGE);
+            return 2;
         } else {
             std::fprintf(stderr, "rsh: unknown option %s\n%s", a.c_str(), USAGE);
             return 2;
@@ -376,6 +691,11 @@ int main(int argc, char** argv) {
         src = read_file("-", ok);
     } else if (i < argc) {
         file = argv[i++];
+        struct stat sb;
+        if (stat(file.c_str(), &sb) == 0 && S_ISDIR(sb.st_mode)) {  // it read as an empty script (M-11)
+            std::fprintf(stderr, "rsh: %s: Is a directory\n", file.c_str());
+            return 126;
+        }
         bool ok;
         src = read_file(file, ok);
         if (!ok) {
@@ -390,6 +710,15 @@ int main(int argc, char** argv) {
         src = read_file("-", ok);
     }
     for (; i < argc; ++i) args.push_back(argv[i]);
+    src = source_text(std::move(src));
+    {
+        std::string word;
+        if (int at = unknown_mode(src, word)) {
+            std::fprintf(stderr, "%s%s:%d: unknown mode `%s` (the mode comment is # rsh: ruby or # rsh: shell)\n",
+                         check || explain ? "" : "rsh: ", file.c_str(), at, word.c_str());
+            return 2;
+        }
+    }
 
     // The shell layer is on unless the file starts with `# rsh: ruby` (after a `#!` line, if any).
     const bool shell = wants_shell_layer(file, src);
@@ -402,7 +731,8 @@ int main(int argc, char** argv) {
             collect_defs(src, slash == std::string::npos ? "." : file.substr(0, slash), k.methods);
             r = transpile(src, file, k);
         } else r.ruby = src;
-        for (auto& d : r.diags) std::fprintf(stderr, "%s:%d: %s\n", file.c_str(), d.line, d.msg.c_str());
+        for (auto& d : r.diags)
+            std::fprintf(stderr, "%s:%d: %s%s\n", file.c_str(), d.line, d.warning ? "warning: " : "", d.msg.c_str());
         if (show_ruby) std::fputs(r.ruby.c_str(), stdout);
         else {
             std::printf("mode: %s\n", shell ? "shell" : "ruby (the shell layer is off: `# rsh: ruby` on the first line)");
@@ -436,12 +766,18 @@ int main(int argc, char** argv) {
                 if (e == src.size()) break;
             }
         }
-        return r.ok() ? 0 : 2;
+        if (!r.ok()) return 2;
+        return explain ? compile_errors(r.ruby, file) : 0;
     }
     mrb_state* mrb = rt_open(file, args);
     if (!mrb) return 70;
+    program_methods(mrb);
+    if (!check) sig::install_script();
     int rc = check ? rt_check(mrb, src, file, lint, shell) : rt_run(mrb, src, file, shell);
+    if (!check) rc = run_at_exit(mrb, rc);
     std::fflush(stdout);
+    int died = sig::died;
     rt_close(mrb);
+    if (died && rc == 128 + died) sig::finish(died);  // as sh: the parent sees the signal
     return rc;
 }

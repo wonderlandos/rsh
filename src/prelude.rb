@@ -3,7 +3,27 @@
 # __rsh_cmd / __rsh_cap (the reader writes those calls); Rsh::Status is $?, Rsh::Failed is what
 # an unhandled failure raises. Also: ENV, JSON, Regexp's Ruby side, Process, Etc, require.
 
-class Interrupt < Exception; end unless Object.const_defined?(:Interrupt)
+# Signals (0.1.4, audit H-2). A signal is noted when it comes and acted on at the next safe point
+# (a command line, an iteration of `loop`, the end of `sleep`): a `trap` block runs there, or TERM,
+# HUP and INT with no trap raise SignalException / Interrupt there, so `ensure` and `at_exit` run.
+# The rest (Signal, trap, at_exit, Dir.home, Process.kill) is src/prelude_more.rb, loaded on first use.
+class SignalException < Exception
+  attr_reader :signo
+
+  # SignalException.new(15, "SIGTERM") is all here; a name or a missing message needs the signal
+  # table, which is in src/prelude_more.rb (loaded here, on first use).
+  def initialize(sig = nil, name = nil)
+    Rsh.__more unless sig.is_a?(Integer) && name
+    @signo = sig.is_a?(Integer) ? sig : Signal.__num(sig || "TERM")
+    super(name || "SIG#{Signal.signame(@signo)}")
+  end
+
+  def signm = message
+end
+
+class Interrupt < SignalException
+  def initialize(msg = "") = super(2, msg)
+end
 class LoadError < ScriptError; end unless Object.const_defined?(:LoadError)
 
 module Rsh
@@ -117,18 +137,51 @@ module Rsh
   end
 end
 
+module Rsh
+  # Stand-ins until the program installs its signal handlers (src/main.cpp); a library user that
+  # does not (the unit tests) has no signals noted. __more loads src/prelude_more.rb.
+  def self.__sigp = false
+  def self.__more = raise(NotImplementedError, "this needs the rsh program (src/prelude_more.rb)")
+  def self.__signals = (__more; __signals)
+end
+
+module Signal
+  def self.trap(*a, &b) = (Rsh.__more; trap(*a, &b))
+  def self.list = (Rsh.__more; list)
+  def self.signame(n) = (Rsh.__more; signame(n))
+end
+
+module Kernel
+  def at_exit(&b) = (Rsh.__more; at_exit(&b))
+  def trap(*a, &b) = (Rsh.__more; trap(*a, &b))
+end
+
+class Dir
+  def self.home(*a) = (Rsh.__more; home(*a))
+end
+
+module Process
+  def self.kill(*a) = (Rsh.__more; kill(*a))
+  def self.ppid = (Rsh.__more; ppid)
+end
+
 def relaxed!(on = true)
   Rsh.relaxed = on
 end
 
 def __rsh_cmd(i, v, cond = false)
+  Rsh.__signals if Rsh.__sigp
   flags = (cond ? 1 : 0) | (Rsh.relaxed? ? 4 : 0)
-  Rsh.__finish(Rsh.__exec(i, Rsh.__vals(v), flags)).success?
+  r = Rsh.__exec(i, Rsh.__vals(v), flags)
+  Rsh.__signals if Rsh.__sigp
+  Rsh.__finish(r).success?
 end
 
 # A capture gives the output as a String; its status is in $?.
 def __rsh_cap(i, v)
+  Rsh.__signals if Rsh.__sigp
   r = Rsh.__exec(i, Rsh.__vals(v), 2 | (Rsh.relaxed? ? 4 : 0))
+  Rsh.__signals if Rsh.__sigp
   Rsh.__finish(r)
   r[7]
 end
@@ -154,6 +207,25 @@ module Kernel
     r = Rsh.__argv(argv, 1)
     st = Rsh.__finish(r)
     st.exitstatus == 127 ? nil : st.success?
+  end
+
+  # loop and sleep are safe points for signals (a script in `loop { }` stops on TERM, runs its
+  # trap blocks and its ensure clauses).
+  def loop(&block)
+    return to_enum(:loop) unless block
+    while true
+      Rsh.__signals if Rsh.__sigp
+      yield
+    end
+  rescue StopIteration => e
+    e.result
+  end
+
+  alias __rsh_sleep sleep
+  def sleep(*args)
+    r = __rsh_sleep(*args)
+    Rsh.__signals if Rsh.__sigp
+    r
   end
 
   def `(_text)
@@ -220,7 +292,42 @@ module Kernel
   end
 end
 
+# chomp: true, as Ruby takes it (gets, readline, readlines, each_line, File.foreach; audit R2-11).
+class IO
+  alias __rsh_gets gets
+  alias __rsh_readline readline
+  alias __rsh_readlines readlines
+  alias __rsh_each_line each_line
+
+  def gets(*args, chomp: false)
+    l = __rsh_gets(*args)
+    chomp && l ? l.chomp : l
+  end
+
+  def readline(*args, chomp: false)
+    l = __rsh_readline(*args)
+    chomp ? l.chomp : l
+  end
+
+  def readlines(*args, chomp: false)
+    r = __rsh_readlines(*args)
+    chomp ? r.map(&:chomp) : r
+  end
+
+  def each_line(*args, chomp: false, &block)
+    return to_enum(:each_line, *args, chomp: chomp) unless block
+    __rsh_each_line(*args) { |l| block.call(chomp ? l.chomp : l) }
+    self
+  end
+end
+
 class File
+  def self.foreach(file, *args, chomp: false, &block)
+    return to_enum(:foreach, file, *args, chomp: chomp) unless block
+    File.open(file) { |f| f.each_line(*args, chomp: chomp, &block) }
+    nil
+  end
+
   class << self
     alias __rsh_expand_path expand_path
 
@@ -246,8 +353,8 @@ class File
     text.bytesize
   end
 
-  def self.readlines(path, *_opts)
-    File.open(path.to_s) { |f| f.each_line.to_a }
+  def self.readlines(path, *args, chomp: false)
+    File.open(path.to_s) { |f| f.each_line(*args, chomp: chomp).to_a }
   end
 end
 
@@ -315,10 +422,6 @@ module Process
     Rsh.__pid
   end
 
-  def self.kill(sig, *pids)
-    pids.each { |p| Rsh.__kill(sig.to_s, p) }
-    pids.size
-  end
 end
 
 module Etc

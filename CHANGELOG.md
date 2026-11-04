@@ -1,5 +1,96 @@
 # Changelog
 
+## 0.1.4
+
+QA-100 round 2 (audits `rsh.md` H-1..L-19 and `rsh-r2.md` R2-1..R2-20): the speed of Regexp loops, the
+end of a script (signals, `at_exit`), a handful of reader mistakes, the interactive shell's typed-ahead
+input, and the files a clean build chroot needs. Each correctness fix has a test that fails on 0.1.3
+and passes here (`tests/golden/r2_*.rsh`, `tests/run.sh` cli cases, `tests/unit.cpp`,
+`tests/interactive.rb`).
+
+### Performance (H-1, M-10, M-5)
+
+Measured by `bench/run.sh` (its `--gate` is part of `make test`): `scan(/\w+/)` on 686 KB 84.6 s -> 0.05 s,
+`split(/ /)` 64 s -> 0.05 s, `gsub(/foo/, "F")` 9.7 s -> 0.007 s, a million `=~` 13.0 s -> 1.4 s,
+a pattern per line over 100,000 lines 86 MB -> 17 MB, `sub(/re/)` in a Ruby stage 3.34 s -> 0.21 s,
+1000 `echo` 0.14 s -> 0.009 s.
+
+- **H-1** A subject is checked for valid UTF-8 once, not once per match (`PCRE2_NO_UTF_CHECK`); a
+  subject that is not valid UTF-8 goes through a twin of the match on its valid pieces that gives the
+  same answer as the engine (`tests/unit_regexp.cpp`, about 2 million random comparisons), so
+  `"caf\xC3".scan(/./)` is still 3 characters. Patterns with `\A` or `\G` on such a subject keep the
+  engine's own (slow) path. `tests/golden/regexp_semantics.rsh`.
+- **M-10** One shared match-data block, a 16-entry cache of compiled patterns (a literal `/re/` is
+  rebuilt by the interpreter on every evaluation), no per-call Arrays for `match?` and `=~`.
+- **M-5** `echo`, `pwd` and `type` run in this process when alone on a line and not captured (a
+  captured one keeps its own process: a long output would fill the pipe), and a failed write is
+  `rsh: echo: write error: ...` with status 1 (`tests/golden/r2_echo_full.rsh`).
+
+### Correctness
+
+- **H-2, R2-13** `at_exit`, `trap` (`Signal.trap`, `"IGNORE"`, `"DEFAULT"`, `trap("EXIT")`), `Signal`.
+  TERM, HUP and INT are noted when they come and acted on at the next safe point (a command line, an
+  iteration of `loop`, the end of `sleep`): a trap block runs, or `SignalException` / `Interrupt` is
+  raised so `ensure` and `at_exit` run, and rsh ends by the signal (143, 129, 130). Code with no safe
+  point is ended by the signal after 2 seconds. The interactive shell handles TERM the same way and
+  Ctrl-C interrupts Ruby code. TERM or HUP that comes while a foreground command runs is passed on to
+  that command, so the script ends at once (not after the 2-second watchdog) with `ensure` and `at_exit`
+  run. A signal ignored by the parent (`nohup`) stays ignored
+  (`golden/r2_signals.rsh`, `run.sh` cli cases, `interactive.rb`).
+- **H-3, L-5** `Dir.home`, `Dir.home("user")`, `Process.ppid`, `$PROGRAM_NAME` (`golden/r2_ruby_bits.rsh`).
+  The Ruby side of these loads on first use (`src/prelude_more.rb`), so `rsh -c nil` does not pay for it.
+- **M-1** `echo {a,b}`: a brace pattern right after the command word is a word. **M-4** `! cmd` is a
+  command line (negation). Both change the reader's rule for those lines only; every line that was
+  there reads as before, and `EXPLAIN_SHA` in `tests/contract.sh` was printed again for the lines added to
+  `tests/golden/classify.rsh` (the two reader fixes and R2-4, R2-7 below).
+- **M-2** A `|` at the end of a line continues on the next line; at the end of the file it is
+  "a command is missing after |". **M-3** In an unquoted here-document a backslash goes only before
+  `$`, a back-quote, `\` and a new line (it ate every backslash). **M-8** `if x then echo a end`: the
+  `end` closes the Ruby construct. (`golden/r2_reader.rsh`, `heredoc.rsh`, `tests/unit.cpp`)
+- **M-6** `Process.kill` knows every signal name of the system and a Symbol; an unknown name is
+  `ArgumentError` and nothing is sent (it sent signal 0 and said it had).
+- **M-7, R2-15, R2-16** Tab completion quotes a name so it stays one word (space, quote, `$`, `*`,
+  `#`, a tab ...), completes inside an open quote, and offers commands after `|`, `;`, `&&`, `||` and `(`.
+- **M-9** `history` lists the earlier sessions' entries and this one's. **M-11** `rsh DIR` is `Is a
+  directory`, 126; a path that exists but cannot run is 126, not 127 (`tests/contract.sh`).
+- **M-12** `# rsh: WORD` with another word than `ruby` or `shell` is status 2 ("unknown mode").
+- **R2-1** The first program of a foreground job takes the terminal in the child before it runs
+  (fork instead of posix_spawn under job control): a program that reads at once is no longer stopped by
+  SIGTTIN (`interactive.rb`; a race, 1 of 20 sessions on the audit machine's 0.1.3 binary, 15 of 20 on
+  the auditor's).
+- **R2-2, R2-8, L-17** The editor keeps typed-ahead and pasted input (`TCSADRAIN`, not `TCSAFLUSH`) and
+  draws once per burst: a 5,000-character paste wrote 12.8 MB to the terminal before, under 50 KB now.
+- **R2-3, R2-12** `-n` and `--lint` warn about a bare word alone in a group (`x = 1 + (y)`) and a
+  command whose first argument is a Ruby operator (`to_der == other`); `--lint` exits 1 for them. The
+  rule itself is unchanged (a documented behaviour that real scripts trip on: a decision for the lead).
+- **R2-4** `Point=Struct.new(:x) do`, `Limit=10; puts Limit`: a Capitalised `NAME=` followed by Ruby is
+  Ruby; `NAME=value cmd` stays a command line. **R2-7** after `&&` or `||` the Ruby words `exit raise
+  abort return break next` and `:` end the command line (`cmd || exit 1` exits 1). **R2-17** `X=~ cmd`
+  stays Ruby and is documented.
+- **R2-5, R2-6** CR LF is read as LF and a leading UTF-8 byte-order mark is dropped, so here-documents,
+  `\` continuations and `# rsh: ruby` work in files saved on Windows.
+- **R2-9, R2-10** Ctrl-R then an arrow or Ctrl-A leaves the search and does the move; ESC then Enter is
+  Enter. **R2-11** `gets`, `readline`, `readlines`, `each_line`, `File.foreach` and `File.readlines` take
+  `chomp: true`. **R2-18** `--explain` exits 2 for Ruby that does not compile, as `-n` does.
+  **R2-19** `exit` or Ctrl-D with jobs running warns once. **R2-20, L-16** sh forms (`[ -f x ]`,
+  `x=$(cmd)`, `set -e`, `. file`, `true && cmd`) are reader errors that say what to write.
+- Lows: **L-3** `$$` is the process id; **L-7** `echo -e` knows `\xHH`, `\0NNN`, `\a \b \f \v`;
+  **L-8** `-c`, `-e`, `--name` without a value say what is missing; **L-9** an `Rsh.eval` syntax error names
+  its own text (`(rsh eval):1:`); **L-12** a NUL byte in the source is named; **L-13** `wait N` for no
+  such job says so; **L-15** `--lint` warns about a fixed `/tmp` name as a redirect target.
+- Decided, not changed: **L-1** the one-line `cd d do pwd end` keeps its message; **L-4** `ENV["a b"] =` is
+  accepted, as Ruby does; **L-6** `pwd` shows the physical folder; **L-10**, **L-11**; **L-18** SIGPIPE
+  of a program is a failed command (listed in `docs/rsh.md`, "Not done yet"); **R2-14** the missing
+  editor keys and the interpreter gaps are listed there too.
+
+### Packaging (from the clean-chroot build of the `rsh` package, PKG-image)
+
+- `packaging.PKGBUILD`: `makedepends` gains `ruby-rake` (the interpreter's `minirake` runs `rake`), and
+  `checkdepends=(procps-ng)` (`tests/golden/sec_m5_jobs.rsh` counts zombies with `ps`).
+- `tests/interactive.rb` completes `/etc/os-release` instead of `/etc/hostname` (a build chroot has no
+  machine name); the `prepare()` `sed` in wolos-pkgbuilds' `rsh/PKGBUILD` is then not needed.
+- The Makefile builds `src/prelude_more.rb` into the program like the other two preludes.
+
 ## 0.1.3
 
 Security and stability: every finding of the 2026-11-04 audit is fixed, each with a regression test

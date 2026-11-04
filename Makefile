@@ -65,6 +65,10 @@ build/prelude.c: src/prelude.rb $(MLIB)
 build/prelude_regexp.c: src/prelude_regexp.rb $(MLIB)
 	$(MRBC) -Brsh_prelude_regexp -o $@ src/prelude_regexp.rb
 
+# Signal, trap, at_exit, Dir.home, Process.kill: loaded on first use (src/main.cpp, Rsh.__more).
+build/prelude_more.c: src/prelude_more.rb $(MLIB)
+	$(MRBC) -Brsh_prelude_more -o $@ src/prelude_more.rb
+
 $(OUT)/obj/prelude.o: build/prelude.c
 	@mkdir -p $(OUT)/obj
 	$(CC) -Os -I$(M)/include -I$(M)/build/rsh/include -c $< -o $@
@@ -73,7 +77,11 @@ $(OUT)/obj/prelude_regexp.o: build/prelude_regexp.c
 	@mkdir -p $(OUT)/obj
 	$(CC) -Os -I$(M)/include -I$(M)/build/rsh/include -c $< -o $@
 
-PRELUDE = $(OUT)/obj/prelude.o $(OUT)/obj/prelude_regexp.o
+$(OUT)/obj/prelude_more.o: build/prelude_more.c
+	@mkdir -p $(OUT)/obj
+	$(CC) -Os -I$(M)/include -I$(M)/build/rsh/include -c $< -o $@
+
+PRELUDE = $(OUT)/obj/prelude.o $(OUT)/obj/prelude_regexp.o $(OUT)/obj/prelude_more.o
 
 $(OUT)/rsh: $(OBJ) $(PRELUDE) $(MLIB)
 	$(CXX) $(CXXFLAGS) -o $@ $(OBJ) $(PRELUDE) $(MLIB) $(LDFLAGS) $(LIBS)
@@ -81,20 +89,27 @@ $(OUT)/rsh: $(OBJ) $(PRELUDE) $(MLIB)
 $(OUT)/unit: tests/unit.cpp $(LIBOBJ) $(PRELUDE) $(MLIB)
 	$(CXX) $(CXXFLAGS) $(PCRE) -Isrc -o $@ tests/unit.cpp $(LIBOBJ) $(PRELUDE) $(MLIB) $(LDFLAGS) $(LIBS)
 
-# The release gate (docs/STABILITY.md): the program's tests, the frozen contract, then every test
-# again on the sanitizer build (address + undefined behaviour, leaks checked; any report fails).
+$(OUT)/unit_regexp: tests/unit_regexp.cpp $(LIBOBJ) $(PRELUDE) $(MLIB)
+	$(CXX) $(CXXFLAGS) $(PCRE) -Isrc -o $@ tests/unit_regexp.cpp $(LIBOBJ) $(PRELUDE) $(MLIB) $(LDFLAGS) $(LIBS)
+
+# The release gate (docs/STABILITY.md): the program's tests, the frozen contract, the speed and
+# memory limits (bench/run.sh --gate), then every test again on the sanitizer build (address +
+# undefined behaviour, leaks checked; any report fails).
 # SANITIZE=0 leaves the second half out (a build host without the sanitizer libraries); a release
 # is never tagged from such a run.
 SANITIZE ?= 1
-test: $(OUT)/unit $(OUT)/rsh
+test: $(OUT)/unit $(OUT)/unit_regexp $(OUT)/rsh
 	./$(OUT)/unit
+	./$(OUT)/unit_regexp
 	RSH=$(CURDIR)/$(OUT)/rsh sh tests/run.sh
 	sh tests/contract.sh $(OUT)/rsh
 	sh tests/doctrine.sh $(OUT)/rsh
 	@if command -v ruby >/dev/null; then ruby tests/interactive.rb $(OUT)/rsh; else echo 'interactive: ruby missing, skipped'; fi
+	sh bench/run.sh --gate $(OUT)/rsh
 ifeq ($(SANITIZE),1)
 	$(MAKE) --no-print-directory asan
 	$(ASAN_ENV) ./build/asan/unit
+	$(ASAN_ENV) ./build/asan/unit_regexp
 	$(ASAN_ENV) RSH=$(CURDIR)/build/asan/rsh sh tests/run.sh
 	$(ASAN_ENV) sh tests/contract.sh build/asan/rsh
 	@echo 'sanitizer run: ok'
@@ -106,10 +121,12 @@ endif
 SAN = -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 ASAN_ENV = ASAN_OPTIONS=detect_leaks=1:abort_on_error=0:exitcode=99 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1:exitcode=98
 asan: $(MLIB)
-	$(MAKE) --no-print-directory OUT=build/asan LINK=dynamic STRIP= OPT='-O1 -g $(SAN)' build/asan/rsh build/asan/unit
+	$(MAKE) --no-print-directory OUT=build/asan LINK=dynamic STRIP= OPT='-O1 -g $(SAN)' build/asan/rsh build/asan/unit build/asan/unit_regexp
 
+# Start-up (tests/bench.sh), then the speed and memory table (bench/run.sh; make test runs its gate).
 bench: build/rsh
 	sh tests/bench.sh build/rsh
+	sh bench/run.sh build/rsh
 
 # make install [PREFIX=/usr] [DESTDIR=staging]
 install: build/rsh
@@ -120,7 +137,7 @@ uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/rsh $(DESTDIR)$(PREFIX)/share/man/man1/rsh.1
 
 clean:
-	rm -rf build/obj build/rsh build/unit build/asan
+	rm -rf build/obj build/rsh build/unit build/unit_regexp build/asan
 
 distclean:
 	rm -rf build

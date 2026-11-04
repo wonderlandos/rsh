@@ -155,5 +155,41 @@ cli "-s --name names the script in \$0" '[ "$(printf "puts \$0\n" | "$rsh" -s --
 cli "start-up does not load the Regexp side (it loads on first use)" '[ "$("$rsh" -c "p Rsh.__regexp")" = true ]'
 cli "a pattern loads it" '[ "$("$rsh" -c "x = /a/; p Rsh.__regexp")" = false ]'
 cli "a plain .rb file gets its arguments" '[ "$("$rsh" "$tmp/cli/args.rb" a "b c")" = "a|b c" ]'
+# 0.1.4 reader and CLI fixes (QA-100 round 2).
+printf 'echo a |\n' >"$tmp/cli/pipe_end.rsh"
+printf 'def f(\n' >"$tmp/cli/rb_bad.rsh"
+printf 'x = 1 + (y)\nto_der == other\n' >"$tmp/cli/groups.rsh"
+printf '# rsh: rubi\nputs 1\n' >"$tmp/cli/mode_typo.rb"
+printf 'at_exit { puts "at_exit ran" }\nbegin\n  loop {}\nensure\n  puts "ensure ran"\nend\n' >"$tmp/cli/term.rsh"
+printf 'while true; end\n' >"$tmp/cli/tight.rsh"
+printf 'echo hi\n' >"$tmp/cli/noexec.rsh"
+chmod 644 "$tmp/cli/noexec.rsh"
+cli "-n: a | at the end of a line is a mistake (M-2)" '! "$rsh" -n "$tmp/cli/pipe_end.rsh" 2>/dev/null'
+cli "--explain exits 2 for Ruby that does not compile, as -n (R2-18)" '! "$rsh" --explain "$tmp/cli/rb_bad.rsh" >/dev/null 2>&1'
+cli "-n warns about a bare word alone in ( ) (R2-3)" '"$rsh" -n "$tmp/cli/groups.rsh" 2>&1 | grep -q "groups.rsh:1: warning: .y. inside ( ) is run as a command"'
+cli "-n warns about a command whose first argument is == (R2-12)" '"$rsh" -n "$tmp/cli/groups.rsh" 2>&1 | grep -q "groups.rsh:2: warning: .==. is the first argument"'
+cli "--lint is 1 for the reader's warnings (R2-3)" '"$rsh" --lint "$tmp/cli/groups.rsh" >/dev/null 2>&1; [ $? = 1 ]'
+cli "an unknown # rsh: mode is status 2 (M-12)" '"$rsh" "$tmp/cli/mode_typo.rb" 2>&1 | grep -q "unknown mode .rubi." && ! "$rsh" -n "$tmp/cli/mode_typo.rb" 2>/dev/null'
+cli "rsh DIR is 126, Is a directory (M-11)" '"$rsh" "$tmp/cli" 2>/dev/null; [ $? = 126 ]'
+cli "a script path that is not executable is 126 (M-11)" '(cd "$tmp/cli" && "$rsh" -c ./noexec.rsh 2>/dev/null); [ $? = 126 ]'
+printf 'echo a\0b\n' >"$tmp/cli/nul.rsh"
+cli "a NUL byte in the source is named, not written raw (L-12)" '"$rsh" "$tmp/cli/nul.rsh" 2>&1 | grep -q "nul.rsh:1: unexpected NUL byte"'
+cli "--lint: a fixed name under /tmp as a redirect target (L-15)" '"$rsh" --lint -c "echo hi > /tmp/fixed" 2>&1 | grep -q "fixed name under /tmp"'
+cli "an uncaught Rsh.eval syntax error names its text (L-9)" '"$rsh" -c "Rsh.eval(\"x = (\")" 2>&1 | grep -q "^rsh: (rsh eval):1: syntax error"'
+cli "wait for a job that is not there says so (L-13)" '"$rsh" -c "wait 12345" 2>&1 | grep -q "wait: 12345: no such job"'
+cli "-c with no text says so (L-8)" '"$rsh" -c 2>&1 | grep -q -- "-c needs TEXT"'
+if command -v timeout >/dev/null; then
+	cli "TERM during a Ruby loop runs ensure and at_exit, then ends by the signal (H-2)" \
+		'[ "$(timeout --preserve-status -s TERM 0.5 "$rsh" "$tmp/cli/term.rsh" 2>&1; echo "s$?")" = "$(printf "ensure ran\nat_exit ran\ns143")" ]'
+	cli "INT during a Ruby loop: the same, 130 (H-2)" \
+		'[ "$(timeout --preserve-status -s INT 0.5 "$rsh" "$tmp/cli/term.rsh" 2>&1; echo "s$?")" = "$(printf "ensure ran\nat_exit ran\ns130")" ]'
+	printf 'at_exit { puts "at_exit ran" }\nbegin\n  $ sleep 5\nensure\n  puts "ensure ran"\nend\n' >"$tmp/cli/waiting.rsh"
+	# TERM to the shell alone (not its group) while a command runs: the command gets it, ensure and
+	# at_exit run, and it takes well under the 2-second watchdog (it waited the 2 s and ran neither).
+	cli "TERM while a foreground command runs: forwarded, ensure and at_exit run, status 143 (H-2)" \
+		'(a=$(date +%s%N); "$rsh" "$tmp/cli/waiting.rsh" >"$tmp/cli/waiting.out" 2>&1 & p=$!; sleep 0.3; kill -TERM $p; wait $p; rc=$?; b=$(date +%s%N); [ $rc = 143 ] && [ "$(cat "$tmp/cli/waiting.out")" = "$(printf "ensure ran\nat_exit ran")" ] && [ $(((b - a) / 1000000)) -lt 1500 ]) 2>/dev/null'
+	cli "TERM in code with no safe point still ends it (the 2-second watchdog)" \
+		'timeout --preserve-status -k 5 -s TERM 0.3 "$rsh" "$tmp/cli/tight.rsh" 2>/dev/null; [ $? = 143 ]'
+fi
 echo "rsh golden: $pass passed, $fail failed"
 [ "$fail" = 0 ]

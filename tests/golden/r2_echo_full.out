@@ -1,0 +1,6 @@
+echo failed: 1
+pwd failed: 1
+type failed: 1
+fine
+captured
+status: 0

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // rsh: the embedded interpreter and what rsh adds to it (Rsh module, Regexp engine, JSON, ENV).
 #pragma once
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -33,6 +35,19 @@ bool wants_shell_layer(const std::string& file, const std::string& src);
 bool rt_prompt(mrb_state* mrb, std::string& out);
 
 std::string read_file(const std::string& path, bool& ok);
+
+// A Regexp subject for the engine: 2 ASCII only, 1 valid UTF-8, -1 not valid UTF-8 (the engine's
+// rules; a subject called valid is matched without the engine's own check).
+int utf8_kind(const char* s, size_t n);
+
+// Where the engine finds invalid UTF-8 (the offset of each bad character); writes up to cap.
+size_t utf8_bad(const char* s, size_t n, size_t* out, size_t cap);
+
+#ifdef PCRE2_H_IDEMPOTENT_GUARD  // files that include <pcre2.h> first
+// One match as with PCRE2_MATCH_INVALID_UTF, from the valid pieces (src/rt.cpp).
+int frag_match(const pcre2_code* code, const char* p, size_t len, size_t start, const size_t* bad, size_t nbad,
+               uint32_t lookbehind, pcre2_match_data* md, pcre2_match_context* cx);
+#endif
 void rt_add_history(const std::string& line);
 
 }  // namespace rsh

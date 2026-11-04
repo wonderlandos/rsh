@@ -162,6 +162,15 @@ static bool in_process(const std::string& n) {
         if (n == *p) return true;
     return false;
 }
+// Builtins that only print: run here too when alone and not captured (no fork, pipe and wait per
+// `echo`, and their write errors reach the status, audit M-5). Captured, they keep their own
+// process: a long output would fill the capture pipe before anyone reads it.
+static const char* const PRINTS_ONLY[] = {"echo", "pwd", "type", nullptr};
+static bool prints_only(const std::string& n) {
+    for (auto p = PRINTS_ONLY; *p; ++p)
+        if (n == *p) return true;
+    return false;
+}
 
 bool expand(const Word& w, const std::vector<Value>& vals, Host& h, std::vector<std::string>& out, std::string& err,
             bool glob_ok) {
@@ -412,8 +421,77 @@ void child_signals_default() {
     for (int s : {SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU, SIGPIPE, SIGCHLD, SIGTERM, SIGHUP}) signal(s, SIG_DFL);
 }
 
-// Starts one stage. in/out: -1 = this process's own.
-bool spawn(Stage& st, int in, int out, int err_to, pid_t pgid, Host& h, std::string& error) {
+// A foreground job under job control (0.1.4, audit R2-1): the child joins its process group and
+// takes the terminal itself before it runs the program, as the shell does after starting it. With
+// posix_spawn only the shell did, so a program that read the terminal at once (cat, less, a sudo
+// password prompt) could get there first and be stopped by SIGTTIN. Everything the child needs is
+// built before fork(); after it, only async-signal-safe calls. Returns the pid, or -1 with `rc` set
+// to the errno of fork or execve.
+pid_t fork_exec_fg(const char* prog, char* const* argv, char* const* envp, int in, int out, int err_to,
+                   const std::vector<std::pair<int, int>>& map, pid_t pgid, int& rc) {
+    int ep[2];
+    if (pipe2(ep, O_CLOEXEC) != 0) {
+        rc = errno;
+        return -1;
+    }
+    // Out of the way of the descriptors the child sets (3>file and the like use low numbers).
+    for (int& f : ep) {
+        int hi = fcntl(f, F_DUPFD_CLOEXEC, 100);
+        if (hi >= 0) {
+            close(f);
+            f = hi;
+        }
+    }
+    int tty = shell().tty;
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(ep[0]);
+        setpgid(0, pgid);  // SIGTTOU is still ignored here (setup_interactive), so tcsetpgrp works
+        tcsetpgrp(tty, pgid ? pgid : getpid());
+        struct sigaction dfl {};
+        dfl.sa_handler = SIG_DFL;
+        for (int sg : {SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU, SIGPIPE, SIGCHLD, SIGTERM, SIGHUP}) sigaction(sg, &dfl, nullptr);
+        sigset_t none;
+        sigemptyset(&none);
+        sigprocmask(SIG_SETMASK, &none, nullptr);
+        auto put = [](int from, int to) {
+            if (from == to) fcntl(to, F_SETFD, 0);  // keep it across exec
+            else dup2(from, to);
+        };
+        if (in >= 0) put(in, 0);
+        if (out >= 0) put(out, 1);
+        if (err_to >= 0) put(err_to, 2);
+        for (auto [target, src] : map) put(src < 0 ? -src - 1 : src, target);
+        execve(prog, argv, envp);
+        int e = errno;
+        if (write(ep[1], &e, sizeof e) < 0) {
+        }
+        _exit(127);
+    }
+    close(ep[1]);
+    if (pid < 0) {
+        rc = errno;
+        close(ep[0]);
+        return -1;
+    }
+    int e = 0;
+    ssize_t r;
+    while ((r = read(ep[0], &e, sizeof e)) < 0 && errno == EINTR) {
+    }
+    close(ep[0]);
+    if (r == sizeof e) {  // execve failed: the child is gone
+        int st;
+        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
+        }
+        rc = e;
+        return -1;
+    }
+    rc = 0;
+    return pid;
+}
+
+// Starts one stage. in/out: -1 = this process's own. `fg`: a foreground job (it gets the terminal).
+bool spawn(Stage& st, int in, int out, int err_to, pid_t pgid, Host& h, std::string& error, bool fg) {
     std::vector<std::pair<int, int>> map;
     std::vector<int> opened;
     if (!open_redirs(st, map, opened, error)) return false;
@@ -423,8 +501,11 @@ bool spawn(Stage& st, int in, int out, int err_to, pid_t pgid, Host& h, std::str
     if (is_builtin(st.argv[0])) {  // a builtin in a pipeline or in the background: its own process
         pid_t pid = fork();
         if (pid == 0) {
+            if (shell().job_control) {
+                setpgid(0, pgid);
+                if (fg && shell().tty >= 0) tcsetpgrp(shell().tty, pgid ? pgid : getpid());
+            }
             child_signals_default();
-            if (shell().job_control) setpgid(0, pgid);
             if (in >= 0) dup2(in, 0);
             if (out >= 0) dup2(out, 1);
             if (err_to >= 0) dup2(err_to, 2);
@@ -437,10 +518,14 @@ bool spawn(Stage& st, int in, int out, int err_to, pid_t pgid, Host& h, std::str
     }
     std::string prog = find_program(st.argv[0]);
     if (prog.empty()) {
-        std::string m = "rsh: " + st.argv[0] + ": command not found\n";
+        // ./script that exists but cannot run (no x bit, a folder): 126 as in sh, not 127 (M-11).
+        struct stat sb;
+        bool there = st.argv[0].find('/') != std::string::npos && stat(st.argv[0].c_str(), &sb) == 0;
+        std::string m = "rsh: " + st.argv[0] + ": " +
+                        (there ? (S_ISDIR(sb.st_mode) ? "Is a directory" : std::strerror(EACCES)) : "command not found") + "\n";
         say(err_to >= 0 ? err_to : 2, m);
         st.tail = m;
-        st.status = 127;
+        st.status = there ? 126 : 127;
         st.done = true;
         done();
         return true;
@@ -472,7 +557,10 @@ bool spawn(Stage& st, int in, int out, int err_to, pid_t pgid, Host& h, std::str
     for (auto& a : st.argv) argv.push_back(a.data());
     argv.push_back(nullptr);
     pid_t pid;
-    int rc = posix_spawn(&pid, prog.c_str(), &fa, &at, argv.data(), envp.data());
+    int rc;
+    if (fg && shell().job_control && shell().tty >= 0) {
+        pid = fork_exec_fg(prog.c_str(), argv.data(), envp.data(), in, out, err_to, map, pgid, rc);
+    } else rc = posix_spawn(&pid, prog.c_str(), &fa, &at, argv.data(), envp.data());
     posix_spawn_file_actions_destroy(&fa);
     posix_spawnattr_destroy(&at);
     done();
@@ -493,6 +581,10 @@ void keep_tail(std::string& tail, const char* buf, size_t n) {
     tail.append(buf, n);
     if (tail.size() > TAIL) tail.erase(0, tail.size() - TAIL);
 }
+
+// The processes the shell is waiting for in the foreground (forward_to_foreground).
+constexpr int MAX_FG = 64;
+volatile pid_t fg_pids[MAX_FG];
 
 int wait_pid(pid_t pid, int* sig, bool* stopped) {
     int st = 0;
@@ -559,7 +651,7 @@ bool pipeline(const Item& it, const std::vector<Value>& vals, Host& h, const Opt
         return false;
     }
     // One builtin that changes this shell (cd, export...): run here.
-    if (m == 1 && !bg && in_process(stages[0].argv[0])) {
+    if (m == 1 && !bg && (in_process(stages[0].argv[0]) || (!o.capture && prints_only(stages[0].argv[0])))) {
         std::vector<std::pair<int, int>> map;
         std::vector<int> opened;
         if (!open_redirs(stages[0], map, opened, oc.error)) return false;
@@ -628,7 +720,7 @@ bool pipeline(const Item& it, const std::vector<Value>& vals, Host& h, const Opt
             err_to = e.w;
             st.errfd = e.r;
         }
-        bool ok = spawn(st, in, out, err_to, pgid, h, oc.error);
+        bool ok = spawn(st, in, out, err_to, pgid, h, oc.error, !bg);
         if (st.pid > 0 && !pgid) pgid = st.pid;
         if (k == 0 && shell().job_control && !bg && st.pid > 0) give_terminal(pgid);
         close_fd(e.w);
@@ -660,6 +752,7 @@ bool pipeline(const Item& it, const std::vector<Value>& vals, Host& h, const Opt
         return true;
     }
     // Read what comes back: captured output, error output to keep, lines for Ruby stages.
+    for (size_t k = 0; k < stages.size() && k < size_t(MAX_FG); ++k) fg_pids[k] = stages[k].pid > 0 ? stages[k].pid : 0;
     bool ignore_int = !shell().interactive;
     struct sigaction ign {}, old_int {}, old_quit {};
     ign.sa_handler = SIG_IGN;
@@ -736,10 +829,12 @@ bool pipeline(const Item& it, const std::vector<Value>& vals, Host& h, const Opt
         }
     }
     if (stage_out_mine) close_fd(stage_out);
-    for (auto& s : stages) {
+    for (size_t k = 0; k < stages.size(); ++k) {
+        Stage& s = stages[k];
         if (s.pid <= 0 || s.done) continue;
         bool stopped = false;
         s.status = wait_pid(s.pid, &s.sig, &stopped);
+        if (k < size_t(MAX_FG)) fg_pids[k] = 0;
         if (stopped) pr.stopped = true;
         if (s.sig == SIGINT) pr.interrupted = true;
     }
@@ -863,6 +958,13 @@ Outcome run_argv(const std::vector<std::string>& argv, Host& h, const Options& o
     return run_line(L, vals, h, o);  // a private line: table() is not touched
 }
 
+void forward_to_foreground(int sig) {
+    for (int k = 0; k < MAX_FG; ++k) {
+        pid_t p = fg_pids[k];
+        if (p > 0) kill(p, sig);
+    }
+}
+
 void report_jobs() {
     for (auto& j : jobs) {
         if (j.done) continue;
@@ -894,6 +996,12 @@ void report_jobs() {
             --ended;
         } else ++it;
     }
+}
+
+int running_jobs() {
+    int n = 0;
+    for (auto& j : jobs) n += !j.done;
+    return n;
 }
 
 void setup_interactive() {
@@ -956,6 +1064,22 @@ int cd_to(const std::string& dir) {
     return 0;
 }
 
+// A builtin's output to fd 1; a failed write is reported as `rsh: NAME: write error: REASON` and
+// gives status 1 (`echo x > /dev/full`; audit M-5).
+static int emit(const char* who, const std::string& s) {
+    size_t o = 0;
+    while (o < s.size()) {
+        ssize_t w = write(1, s.data() + o, s.size() - o);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) {
+            complain(std::string(who) + ": write error: " + std::strerror(w < 0 ? errno : EIO));
+            return 1;
+        }
+        o += size_t(w);
+    }
+    return 0;
+}
+
 int run_builtin(const std::vector<std::string>& a, Host& h, const Env& env) {
     const std::string& n = a[0];
     if (n == "cd") {
@@ -983,8 +1107,7 @@ int run_builtin(const std::vector<std::string>& a, Host& h, const Env& env) {
             complain("pwd: the current folder was removed");
             return 1;
         }
-        say(1, now + "\n");
-        return 0;
+        return emit("pwd", now + "\n");
     }
     if (n == "pushd" || n == "popd" || n == "dirs") {
         auto& st = shell().dirstack;
@@ -1108,26 +1231,44 @@ int run_builtin(const std::vector<std::string>& a, Host& h, const Env& env) {
                     continue;
                 }
                 char c = s[++i];
-                out += c == 'n' ? '\n' : c == 't' ? '\t' : c == '\\' ? '\\' : c == 'e' ? '\033' : c == 'r' ? '\r' : c;
+                // \xHH (1-2 hex digits) and \0NNN (up to 3 octal digits), as bash's echo -e (audit L-7)
+                if (c == 'x' && i + 1 < s.size() && std::isxdigit((unsigned char)s[i + 1])) {
+                    int v = 0, d = 0;
+                    while (d < 2 && i + 1 < s.size() && std::isxdigit((unsigned char)s[i + 1])) {
+                        char h = s[++i];
+                        v = v * 16 + (h <= '9' ? h - '0' : (h | 32) - 'a' + 10);
+                        ++d;
+                    }
+                    out += char(v);
+                } else if (c == '0') {
+                    int v = 0, d = 0;
+                    while (d < 3 && i + 1 < s.size() && s[i + 1] >= '0' && s[i + 1] <= '7') {
+                        v = v * 8 + (s[++i] - '0');
+                        ++d;
+                    }
+                    out += char(v);
+                } else
+                    out += c == 'n' ? '\n' : c == 't' ? '\t' : c == '\\' ? '\\' : c == 'e' ? '\033' : c == 'r' ? '\r'
+                         : c == 'a' ? '\a' : c == 'b' ? '\b' : c == 'f' ? '\f' : c == 'v' ? '\v' : c;
             }
         }
         if (nl) out += '\n';
-        say(1, out);
-        return 0;
+        return emit("echo", out);
     }
     if (n == "type") {
         int rc = 0;
+        std::string out;
         for (size_t k = 1; k < a.size(); ++k) {
-            if (is_builtin(a[k])) say(1, a[k] + " is a shell builtin\n");
+            if (is_builtin(a[k])) out += a[k] + " is a shell builtin\n";
             else {
                 std::string p = find_program(a[k]);
                 if (p.empty()) {
-                    say(1, a[k] + " is not a command\n");
+                    out += a[k] + " is not a command\n";
                     rc = 1;
-                } else say(1, a[k] + " is " + p + "\n");
+                } else out += a[k] + " is " + p + "\n";
             }
         }
-        return rc;
+        return emit("type", out) ? 1 : rc;
     }
     if (n == "jobs") {
         report_jobs();
@@ -1166,7 +1307,10 @@ int run_builtin(const std::vector<std::string>& a, Host& h, const Env& env) {
         int code = 0;
         if (a.size() > 1) {
             Job* j = find_job(a);
-            if (!j) return 127;
+            if (!j) {
+                complain("wait: " + a[1] + ": no such job");  // it said nothing (L-13)
+                return 127;
+            }
             code = wait_job(*j);
         } else
             for (auto& j : jobs) code = wait_job(j);

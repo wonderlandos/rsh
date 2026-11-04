@@ -20,3 +20,8 @@ cat <<-EOF > doc.txt
 	EOF
 cat doc.txt
 puts "classified after: #{who}"
+# 0.1.4 (audit M-3): as in sh, a backslash goes only before $ ` \ and a newline (and #{ here)
+cat <<EOT
+printf "%s\n" C:\Users \$HOME \\ \#{not a value} a\
+b
+EOT

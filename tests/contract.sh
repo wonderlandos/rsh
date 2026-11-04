@@ -24,8 +24,11 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 cd "$tmp" || exit 99
 
 # ---- frozen digests (0.1.3) ------------------------------------------------------------------
+# EXPLAIN_SHA re-printed in 0.1.4: classify.rsh gained the cases of the reader fixes M-1 (`echo
+# {a,b}`), M-4 (`! cmd`), R2-4 (`Pair=Struct.new(:x) do` is Ruby) and R2-7 (`cmd || exit 1`); the
+# lines that were there read as before (CHANGELOG.md, 0.1.4).
 USAGE_SHA=ade70bab185af47172c3afca88964ec5e08b13a1eedff5e12f1936a24257130e
-EXPLAIN_SHA=2dba739d29951058b61109285fde75aef966c10efb8b2b2da601660932cbd2fd
+EXPLAIN_SHA=926c120c89eb747ea34d65027d122a628869a3d784512c5e04681c3f69f55fee
 WORDS_SHA=06f3f08a2192c35b08799e82141a30efb8198a9e03227c84f15e2a8d62a2d76a
 BUILTINS_SHA=76e3078a9e447355f0e2f4cd969b5e2939a4f548e9e74b3c9b042285ad16e166
 BUILD_SHA=1b2c61f0bdeb43241be9020716011ec8d7293d49dd15f805c7009fcb4de1ef6a
@@ -88,6 +91,12 @@ ok "127 command not found" status 127 "$rsh" -c 'zz-no-such-command-zz'
 printf 'not a program\n' >notexec
 chmod +x notexec
 ok "126 cannot run" status 126 "$rsh" -c './notexec'
+printf 'echo x\n' >noxbit
+chmod 644 noxbit
+ok "126 found, not executable (0.1.4)" status 126 "$rsh" -c './noxbit'
+ok "126 a folder as the script (0.1.4)" status 126 "$rsh" .
+ok "127 a missing program after || is still 127 (0.1.4)" status 127 "$rsh" -c 'sh -c "exit 1" || zz-no-such-command-zz'
+ok "exit after || is Ruby's exit (0.1.4)" status 1 "$rsh" -c 'zz-no-such-command-zz 2>/dev/null || exit 1'
 ok "exit N" status 5 "$rsh" -c 'exit 5'
 printf 'puts 1\n' >clean.rsh
 printf 'zz-no-such-command-zz\n' >warn.rsh

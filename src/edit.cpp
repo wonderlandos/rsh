@@ -2,6 +2,7 @@
 #include "edit.hpp"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <termios.h>
@@ -53,14 +54,24 @@ int read_key() {
     }
 }
 
+// More input is already there (a paste, keys typed ahead): the line is drawn once after it.
+bool pending() {
+    pollfd p{0, POLLIN, 0};
+    return poll(&p, 1, 0) > 0 && (p.revents & POLLIN);
+}
+
 enum Key { K_UP = 1000, K_DOWN, K_LEFT, K_RIGHT, K_HOME, K_END, K_DEL, K_WLEFT, K_WRIGHT };
 
+// After ESC. An Enter that follows is Enter, not part of a sequence (ESC, Enter swallowed the
+// Enter, audit R2-10).
 int escape() {
     int a = read_key();
+    if (a == '\r' || a == '\n') return a;
     if (a == 'b') return K_WLEFT;
     if (a == 'f') return K_WRIGHT;
     if (a != '[' && a != 'O') return -2;
     int b = read_key();
+    if (b == '\r' || b == '\n') return b;
     if (b >= '0' && b <= '9') {
         std::string num(1, char(b));
         int c;
@@ -103,6 +114,71 @@ std::string common_prefix(const std::vector<std::string>& v) {
 }
 
 }  // namespace
+
+// Where the word being typed at `pos` starts: quotes and backslashes are followed, so `sp\ a` and
+// `'sp a` are one word; | ; & < > ( and blanks outside quotes separate words.
+size_t word_start(const std::string& line, size_t pos) {
+    size_t start = 0;
+    char q = 0;
+    for (size_t k = 0; k < pos && k < line.size(); ++k) {
+        char c = line[k];
+        if (q) {
+            if (c == '\\' && q == '"') ++k;
+            else if (c == q) q = 0;
+            continue;
+        }
+        if (c == '\\') {
+            ++k;
+            continue;
+        }
+        if (c == '\'' || c == '"') {
+            q = c;
+            continue;
+        }
+        if (c == ' ' || c == '\t' || std::strchr("|;&<>(", c)) start = k + 1;
+    }
+    return start;
+}
+
+// The text of a typed word without its quoting (an open quote is fine: `'sp a`).
+std::string unquote_word(const std::string& w) {
+    std::string o;
+    char q = 0;
+    for (size_t k = 0; k < w.size(); ++k) {
+        char c = w[k];
+        if (q == '\'') {
+            if (c == '\'') q = 0;
+            else o += c;
+        } else if (c == '\\' && k + 1 < w.size() && (!q || std::strchr("\"\\$#`", w[k + 1]))) {
+            o += w[++k];
+        } else if (q == '"') {
+            if (c == '"') q = 0;
+            else o += c;
+        } else if (c == '\'' || c == '"') q = c;
+        else o += c;
+    }
+    return o;
+}
+
+// A name as one word of a command line (M-7, R2-16): a backslash before each character the reader
+// would take as syntax; a name with a control byte (a tab, a newline) in single quotes. The bytes
+// stay as they are (a name that is not UTF-8 is inserted as its own bytes).
+std::string quote_word(const std::string& n, bool keep_tilde) {
+    bool ctrl = false;
+    for (char c : n) ctrl |= (unsigned char)c < 0x20 || c == 0x7f;
+    if (ctrl) {
+        std::string o = "'";
+        for (char c : n) o += c == '\'' ? std::string("'\\''") : std::string(1, c);
+        return o + "'";
+    }
+    std::string o;
+    for (size_t k = 0; k < n.size(); ++k) {
+        char c = n[k];
+        if (std::strchr(" ;|&<>()'\"\\$#*?[]{}`!", c) || (c == '~' && k == 0 && !keep_tilde)) o += '\\';
+        o += c;
+    }
+    return o;
+}
 
 // Columns of one code point on a terminal: 0 for combining marks and joiners, 2 for East Asian
 // wide and full-width forms and emoji, else 1 (audit L9; a table of the main blocks, no locale).
@@ -349,7 +425,9 @@ bool Editor::read(const std::string& prompt, std::string& result) {
     raw.c_lflag &= ~tcflag_t(ECHO | ICANON | IEXTEN | ISIG);
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
-    tcsetattr(0, TCSAFLUSH, &raw);
+    // TCSADRAIN, not TCSAFLUSH: input not read yet (the rest of a pasted block, keys typed while a
+    // command ran) stays for the next read (0.1.4, audit R2-2).
+    tcsetattr(0, TCSADRAIN, &raw);
 
     std::string buf;
     size_t pos = 0;
@@ -375,15 +453,18 @@ bool Editor::read(const std::string& prompt, std::string& result) {
         pos = buf.size();
         draw();
         out("\r\n");
-        tcsetattr(0, TCSAFLUSH, &old);
+        tcsetattr(0, TCSADRAIN, &old);
         result = buf;
         return ok;
     };
     draw();
+    int again = -1;  // a key the history search ended with, done here (Left, Ctrl-A ...)
     for (;;) {
-        int k = read_key();
+        int k = again >= 0 ? again : read_key();
+        bool replay = again >= 0;
+        again = -1;
         if (k < 0) return done(!buf.empty());
-        if (k == 27) k = escape();
+        if (k == 27 && !replay) k = escape();
         bool was_tab = tabbed;
         tabbed = false;
         switch (k) {
@@ -392,7 +473,7 @@ bool Editor::read(const std::string& prompt, std::string& result) {
             case 4:  // Ctrl-D
                 if (buf.empty()) {
                     out("\r\n");
-                    tcsetattr(0, TCSAFLUSH, &old);
+                    tcsetattr(0, TCSADRAIN, &old);
                     return false;
                 }
                 [[fallthrough]];
@@ -481,6 +562,10 @@ bool Editor::read(const std::string& prompt, std::string& result) {
                             buf = history[found];
                             pos = buf.size();
                         }
+                        // A key that ends the search is then done on the line found (bash does the
+                        // same): an arrow or Ctrl-A moves in it, its bytes are never text (R2-9).
+                        if (c == 27) c = escape();
+                        if (c >= 0 && c != 3 && c != 7 && c != '\r' && c != '\n') again = c;
                         break;
                     }
                     found = history.size();
@@ -494,8 +579,7 @@ bool Editor::read(const std::string& prompt, std::string& result) {
             }
             case '\t': {
                 if (!complete) break;
-                size_t start = pos;
-                while (start > 0 && buf[start - 1] != ' ' && buf[start - 1] != '\t') --start;
+                size_t start = word_start(buf, pos);
                 auto c = complete(buf.substr(0, pos), start);
                 if (c.empty()) break;
                 std::string word = buf.substr(start, pos - start);
@@ -525,7 +609,9 @@ bool Editor::read(const std::string& prompt, std::string& result) {
                     ++pos;
                 }
         }
-        draw();
+        // One draw per burst of input, not per byte: a 20,000-byte paste drew the whole line 20,000
+        // times (200 MB to the terminal, audit R2-8/L-17).
+        if (!pending()) draw();
     }
 }
 

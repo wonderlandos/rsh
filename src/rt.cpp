@@ -499,6 +499,17 @@ mrb_value m_load(mrb_state* mrb, mrb_value) {
     if (mrb->exc) {
         mrb_value e = mrb_obj_value(mrb->exc);
         mrb->exc = nullptr;
+        // The compiler says "line N: ..." for the text's own line; name the text, not the caller's
+        // file (Rsh.eval("x = (") reported `FILE:1:` against the script's name, audit L-9).
+        if (!std::strcmp(mrb_obj_classname(mrb, e), "SyntaxError")) {
+            mrb_value named = mrb_nil_value();
+            {  // no C++ object alive across the raise (it does not unwind)
+                mrb_value msg = mrb_funcall(mrb, e, "message", 0);
+                std::string m = mrb_string_p(msg) ? cxx(msg) : "";
+                if (m.compare(0, 5, "line ") == 0) named = str(mrb, std::string(file) + ":" + m.substr(5));
+            }
+            if (!mrb_nil_p(named)) raise_with(mrb, mrb_class_get(mrb, "SyntaxError"), named);
+        }
         mrb_exc_raise(mrb, e);
     }
     return v;
@@ -541,19 +552,68 @@ int RtHost::source(const std::vector<std::string>& a) {
 }
 
 // ---- Regexp over the system's regex library ------------------------------------------------------
+// Two compiled codes per pattern (audit H-1). The engine checks a UTF-8 subject on every call
+// unless told it was checked, and with PCRE2_MATCH_INVALID_UTF it checks always (from the start
+// offset to the end), which made every loop over a long text quadratic. So: `code` is compiled
+// with PCRE2_UTF only and runs with PCRE2_NO_UTF_CHECK on a subject this file checked once
+// (utf8_kind); `inv` adds PCRE2_MATCH_INVALID_UTF, is made on the first subject with an invalid
+// sequence, and keeps the behaviour of 0.1.3 there (an invalid byte matches no pattern item and
+// is kept: "caf\xC3".scan(/./).size == 3). The loops without a block (scan, split, sub/gsub with
+// a String) run here, the subject checked once per call; the Ruby loops (a block, a Hash) match on
+// a frozen copy, whose check is remembered (Re::subj, kept alive in @__subject). One match data
+// for all patterns (match_data).
 
 struct Re {
     pcre2_code* code = nullptr;
-    pcre2_match_data* md = nullptr;
+    pcre2_code* inv = nullptr;  // only for a pattern that cannot take frag_match
+    uint32_t opts = 0, groups = 0, lookbehind = 0;
+    bool frag = false;               // an invalid subject goes through frag_match (no \A or \G, newline LF)
+    const RString* subj = nullptr;  // the last frozen subject checked
+    const char* sptr = nullptr;
+    mrb_int slen = 0;
+    int kind = 0;
+    size_t *bad = nullptr, nbad = 0, badcap = 0;  // utf8_bad of the subject checked last
 };
 void re_free(mrb_state* mrb, void* p) {
     auto* r = static_cast<Re*>(p);
     if (!r) return;
-    if (r->md) pcre2_match_data_free(r->md);
     if (r->code) pcre2_code_free(r->code);
+    if (r->inv) pcre2_code_free(r->inv);
+    if (r->bad) mrb_free(mrb, r->bad);
     mrb_free(mrb, r);
 }
 const mrb_data_type re_type = {"Regexp", re_free};
+
+// The names the match functions use, looked up once per interpreter (a symbol lookup costs about
+// half a microsecond here, ten of them per match were most of the time of =~). rt_open resets it.
+struct ReNames {
+    mrb_state* owner = nullptr;
+    mrb_sym last, nth[10], regexp, string, offsets, source, options, subject, loaded;
+    RClass* match_data;
+    RClass* error;
+};
+ReNames re_names;
+const ReNames& names(mrb_state* mrb) {
+    ReNames& n = re_names;
+    if (n.owner == mrb) return n;
+    n.last = mrb_intern_lit(mrb, "$~");
+    char name[3] = {'$', '0', 0};
+    for (int k = 1; k <= 9; ++k) {
+        name[1] = char('0' + k);
+        n.nth[k] = mrb_intern(mrb, name, 2);
+    }
+    n.regexp = mrb_intern_lit(mrb, "@regexp");
+    n.string = mrb_intern_lit(mrb, "@string");
+    n.offsets = mrb_intern_lit(mrb, "@offsets");
+    n.source = mrb_intern_lit(mrb, "@source");
+    n.options = mrb_intern_lit(mrb, "@options");
+    n.subject = mrb_intern_lit(mrb, "@__subject");
+    n.loaded = mrb_intern_lit(mrb, "__rsh_loaded");
+    n.match_data = mrb_class_get(mrb, "MatchData");
+    n.error = mrb_class_get(mrb, "RegexpError");
+    n.owner = mrb;
+    return n;
+}
 
 // The few places where Ruby's pattern language and the engine's differ.
 std::string translate(const std::string& s) {
@@ -575,12 +635,184 @@ std::string translate(const std::string& s) {
     return o;
 }
 
+}  // namespace
+
+// What a subject is, for the engine: 2 ASCII only, 1 valid UTF-8, -1 not valid UTF-8. The rules are
+// the engine's (RFC 3629: no overlong forms, no surrogates, nothing over U+10FFFF), so a subject
+// called valid here is valid for PCRE2_NO_UTF_CHECK. Eight bytes at a time while they are ASCII.
+int utf8_kind(const char* s, size_t n) {
+    const auto* p = reinterpret_cast<const unsigned char*>(s);
+    size_t i = 0;
+    bool ascii = true;
+    while (i < n) {
+        if (i + 8 <= n) {
+            uint64_t w;
+            std::memcpy(&w, p + i, 8);
+            if (!(w & 0x8080808080808080ULL)) {
+                i += 8;
+                continue;
+            }
+        }
+        unsigned c = p[i];
+        if (c < 0x80) {
+            ++i;
+            continue;
+        }
+        ascii = false;
+        auto cont = [&](size_t k) { return i + k < n && (p[i + k] & 0xC0) == 0x80; };
+        if (c < 0xC2) return -1;
+        if (c < 0xE0) {
+            if (!cont(1)) return -1;
+            i += 2;
+        } else if (c < 0xF0) {
+            if (!cont(1) || !cont(2)) return -1;
+            if ((c == 0xE0 && p[i + 1] < 0xA0) || (c == 0xED && p[i + 1] >= 0xA0)) return -1;
+            i += 3;
+        } else if (c < 0xF5) {
+            if (!cont(1) || !cont(2) || !cont(3)) return -1;
+            if ((c == 0xF0 && p[i + 1] < 0x90) || (c == 0xF4 && p[i + 1] >= 0x90)) return -1;
+            i += 4;
+        } else return -1;
+    }
+    return ascii ? 2 : 1;
+}
+
+namespace {
+bool cont_byte(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
+// The length of the valid character at p[i], or 0 (utf8_kind's rules).
+size_t char_len(const unsigned char* p, size_t i, size_t n) {
+    unsigned c = p[i];
+    auto cont = [&](size_t k) { return i + k < n && (p[i + k] & 0xC0) == 0x80; };
+    if (c < 0x80) return 1;
+    if (c < 0xC2) return 0;
+    if (c < 0xE0) return cont(1) ? 2 : 0;
+    if (c < 0xF0) {
+        if (!cont(1) || !cont(2) || (c == 0xE0 && p[i + 1] < 0xA0) || (c == 0xED && p[i + 1] >= 0xA0)) return 0;
+        return 3;
+    }
+    if (c < 0xF5) {
+        if (!cont(1) || !cont(2) || !cont(3) || (c == 0xF0 && p[i + 1] < 0x90) || (c == 0xF4 && p[i + 1] >= 0x90)) return 0;
+        return 4;
+    }
+    return 0;
+}
+}  // namespace
+
+// Where the engine finds invalid UTF-8 in s[0, n): the offset of each bad character, as its own
+// check reports it (pcre2_get_startchar after a UTF error), going on one byte later and past
+// continuation bytes, as PCRE2_MATCH_INVALID_UTF does. Writes up to cap offsets; returns how many.
+size_t utf8_bad(const char* s, size_t n, size_t* out, size_t cap) {
+    const auto* p = reinterpret_cast<const unsigned char*>(s);
+    size_t i = 0, k = 0;
+    while (i < n) {
+        if (i + 8 <= n) {
+            uint64_t w;
+            std::memcpy(&w, p + i, 8);
+            if (!(w & 0x8080808080808080ULL)) {
+                i += 8;
+                continue;
+            }
+        }
+        size_t l = char_len(p, i, n);
+        if (l) {
+            i += l;
+            continue;
+        }
+        if (k < cap) out[k] = i;
+        ++k;
+        ++i;
+        while (i < n && cont_byte(s[i])) ++i;
+    }
+    return k;
+}
+
+// One match as the engine makes it with PCRE2_MATCH_INVALID_UTF (pcre2_match.c, "fragments"),
+// but on the valid pieces only, with PCRE2_NO_UTF_CHECK and `code` compiled without that option:
+// the engine's own way re-checks the subject from the start offset to the next invalid byte on
+// every call, quadratic in a scan of a long text with one bad byte at its end. The steps are the
+// engine's: skip continuation bytes at the start; look behind at most `lookbehind` characters and
+// not over a bad one; the first piece ends at the next bad character (no end of line there); if it
+// does not match, each next piece (no start or end of line at its edges). A piece is passed as its
+// own subject, so \A and \G would match at its start: a pattern with them does not come here
+// (Re::frag).
+// `bad` is utf8_bad of the subject. The offsets in md are made absolute.
+int frag_match(const pcre2_code* code, const char* p, size_t len, size_t start, const size_t* bad, size_t nbad,
+               uint32_t lookbehind, pcre2_match_data* md, pcre2_match_context* cx) {
+    auto next_bad = [&](size_t from) {
+        size_t lo = 0, hi = nbad;
+        while (lo < hi) {
+            size_t mid = (lo + hi) / 2;
+            if (bad[mid] < from) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo < nbad ? bad[lo] : len;
+    };
+    size_t s0 = start;
+    bool skipped = false;
+    while (s0 < len && cont_byte(p[s0])) {
+        ++s0;
+        skipped = true;
+    }
+    size_t cs = s0;
+    if (!skipped)
+        for (uint32_t i = lookbehind; i > 0 && cs > 0; --i) {
+            --cs;
+            while (cs > 0 && cont_byte(p[cs])) --cs;
+        }
+    size_t x;
+    for (;;) {
+        x = next_bad(cs);
+        if (x >= s0) break;
+        cs = x + 1;
+        while (cs < s0 && cont_byte(p[cs])) ++cs;
+    }
+    uint32_t opt = PCRE2_NO_UTF_CHECK | (x < len ? PCRE2_NOTEOL : 0);
+    if (cs > 0 && (p[cs - 1] != '\n' || cs == x)) opt |= PCRE2_NOTBOL;  // ^ at cs: only after a newline
+    int rc = pcre2_match(code, reinterpret_cast<PCRE2_SPTR>(p + cs), x - cs, s0 - cs, opt, md, cx);
+    while (rc == PCRE2_ERROR_NOMATCH && x < len) {
+        size_t st = x + 1;
+        while (st < len && cont_byte(p[st])) ++st;
+        if (st >= len) break;
+        x = next_bad(st);
+        if (x == st) continue;
+        cs = st;
+        rc = pcre2_match(code, reinterpret_cast<PCRE2_SPTR>(p + cs), x - cs, 0,
+                         PCRE2_NO_UTF_CHECK | PCRE2_NOTBOL | (x < len ? PCRE2_NOTEOL : 0), md, cx);
+    }
+    if (rc > 0) {
+        PCRE2_SIZE* ov = pcre2_get_ovector_pointer(md);
+        for (int g = 0; g < rc; ++g)
+            if (ov[2 * g] != PCRE2_UNSET) ov[2 * g] += cs, ov[2 * g + 1] += cs;
+    }
+    return rc;
+}
+
+namespace {
+
+extern "C" {
+mrb_value mrb_str_byte_subseq(mrb_state* mrb, mrb_value str, mrb_int beg, mrb_int len);
+mrb_int mrb_utf8len(const char* str, const char* end);
+}
+
+// The number of characters in the first n bytes of a subject of this kind (String#size's count:
+// an invalid byte is one character).
+mrb_int char_count(const char* p, mrb_int n, int kind) {
+    if (kind == 2) return n;
+    mrb_int c = 0;
+    if (kind == 1) {
+        for (mrb_int i = 0; i < n; ++i) c += (static_cast<unsigned char>(p[i]) & 0xC0) != 0x80;
+        return c;
+    }
+    for (const char *q = p, *e = p + n; q < e; ++c) q += static_cast<unsigned char>(*q) < 0x80 ? 1 : mrb_utf8len(q, e);
+    return c;
+}
+
 // Rsh.__regexp: loads the Ruby side of Regexp (src/prelude_regexp.rb) once per interpreter; true
 // if it was loaded by this call. Called by the first Regexp made and by the stand-ins in
 // src/prelude.rb, so start-up does not read it.
 mrb_value m_regexp(mrb_state* mrb, mrb_value) {
     mrb_value re = mrb_obj_value(mrb_class_get(mrb, "Regexp"));
-    mrb_sym done = mrb_intern_lit(mrb, "__rsh_loaded");
+    mrb_sym done = names(mrb).loaded;
     if (mrb_iv_defined(mrb, re, done)) return mrb_false_value();
     mrb_iv_set(mrb, re, done, mrb_true_value());
     // At the top level, as src/prelude.rb is: `class MatchData` names ::MatchData even though the
@@ -599,6 +831,43 @@ mrb_value m_regexp(mrb_state* mrb, mrb_value) {
     return mrb_true_value();
 }
 
+// Compiles `src` (Ruby's pattern language) with `o`; nil, or the error message.
+// The last patterns compiled, so a pattern literal in a loop (made again on every pass: the
+// interpreter compiles /re/ to Regexp.compile) is a copy, not a compile. Owned here; each Regexp
+// gets its own copy (pcre2_code_copy).
+struct CompiledPattern {
+    std::string src;
+    uint32_t opts = 0;
+    pcre2_code* code = nullptr;
+};
+CompiledPattern compiled[16];
+unsigned compiled_next = 0;
+
+mrb_value re_compile(mrb_state* mrb, mrb_value src, uint32_t o, pcre2_code** out) {
+    const char* sp = RSTRING_PTR(src);
+    size_t sn = size_t(RSTRING_LEN(src));
+    for (CompiledPattern& c : compiled)
+        if (c.code && c.opts == o && c.src.size() == sn && !std::memcmp(c.src.data(), sp, sn)) {
+            *out = pcre2_code_copy(c.code);
+            if (*out) return mrb_nil_value();
+        }
+    std::string pat = translate(cxx(src));
+    int ec;
+    PCRE2_SIZE eo;
+    *out = pcre2_compile(reinterpret_cast<PCRE2_SPTR>(pat.data()), pat.size(), o, &ec, &eo, nullptr);
+    if (*out) {
+        CompiledPattern& c = compiled[compiled_next++ % 16];
+        if (c.code) pcre2_code_free(c.code);
+        c.code = pcre2_code_copy(*out);
+        c.src.assign(sp, sn);
+        c.opts = o;
+        return mrb_nil_value();
+    }
+    PCRE2_UCHAR buf[256];
+    pcre2_get_error_message(ec, buf, sizeof buf);
+    return str(mrb, std::string(reinterpret_cast<char*>(buf)) + " at " + std::to_string(eo) + ": /" + cxx(src) + "/");
+}
+
 mrb_value m_re_init(mrb_state* mrb, mrb_value self) {
     // The arguments first: running the Regexp side's code from here reuses this call's argument
     // slots (the interpreter's rule for code run from a C function), so they are read before.
@@ -608,8 +877,8 @@ mrb_value m_re_init(mrb_state* mrb, mrb_value self) {
     mrb_gc_protect(mrb, opt);
     m_regexp(mrb, self);
     if (mrb_obj_is_kind_of(mrb, src, mrb_class_get(mrb, "Regexp"))) {
-        opt = mrb_iv_get(mrb, src, mrb_intern_lit(mrb, "@options"));
-        src = mrb_iv_get(mrb, src, mrb_intern_lit(mrb, "@source"));
+        opt = mrb_iv_get(mrb, src, names(mrb).options);
+        src = mrb_iv_get(mrb, src, names(mrb).source);
     }
     if (!mrb_string_p(src)) mrb_raise(mrb, E_TYPE_ERROR, "a Regexp needs a String");
     mrb_int flags = 0;
@@ -617,33 +886,55 @@ mrb_value m_re_init(mrb_state* mrb, mrb_value self) {
     else if (mrb_string_p(opt)) {
         for (char c : cxx(opt)) flags |= c == 'i' ? 1 : c == 'x' ? 2 : c == 'm' ? 4 : 0;
     } else if (mrb_test(opt)) flags = 1;
-    mrb_value err = mrb_nil_value();
     Re* re = static_cast<Re*>(mrb_malloc(mrb, sizeof(Re)));
-    re->code = nullptr;
-    re->md = nullptr;
+    *re = Re{};
     if (DATA_PTR(self)) re_free(mrb, DATA_PTR(self));
     DATA_PTR(self) = re;
     DATA_TYPE(self) = &re_type;
-    {
-        std::string pat = translate(cxx(src));
-        uint32_t o = PCRE2_UTF | PCRE2_MULTILINE | PCRE2_MATCH_INVALID_UTF;
-        if (flags & 1) o |= PCRE2_CASELESS;
-        if (flags & 2) o |= PCRE2_EXTENDED;
-        if (flags & 4) o |= PCRE2_DOTALL;
-        int ec;
-        PCRE2_SIZE eo;
-        re->code = pcre2_compile(reinterpret_cast<PCRE2_SPTR>(pat.data()), pat.size(), o, &ec, &eo, nullptr);
-        if (!re->code) {
-            PCRE2_UCHAR buf[256];
-            pcre2_get_error_message(ec, buf, sizeof buf);
-            err = str(mrb, std::string(reinterpret_cast<char*>(buf)) + " at " + std::to_string(eo) + ": /" + cxx(src) + "/");
-        } else re->md = pcre2_match_data_create_from_pattern(re->code, nullptr);
+    re->opts = PCRE2_UTF | PCRE2_MULTILINE;
+    if (flags & 1) re->opts |= PCRE2_CASELESS;
+    if (flags & 2) re->opts |= PCRE2_EXTENDED;
+    if (flags & 4) re->opts |= PCRE2_DOTALL;
+    mrb_value err = re_compile(mrb, src, re->opts, &re->code);
+    if (re->code) {
+        pcre2_pattern_info(re->code, PCRE2_INFO_CAPTURECOUNT, &re->groups);
+        pcre2_pattern_info(re->code, PCRE2_INFO_MAXLOOKBEHIND, &re->lookbehind);
+        uint32_t nl = 0;
+        pcre2_pattern_info(re->code, PCRE2_INFO_NEWLINE, &nl);
+        bool anchor = false;  // \A, \G: frag_match passes a piece as the subject
+        const char* sp = RSTRING_PTR(src);
+        for (mrb_int i = 0; i + 1 < RSTRING_LEN(src); ++i)
+            if (sp[i] == '\\') {
+                anchor |= sp[i + 1] == 'A' || sp[i + 1] == 'G';
+                ++i;
+            }
+        re->frag = nl == PCRE2_NEWLINE_LF && !anchor;
     }
-    if (!mrb_nil_p(err)) raise_with(mrb, mrb_class_get(mrb, "RegexpError"), err);
-    mrb_iv_set(mrb, self, mrb_intern_lit(mrb, "@source"), mrb_str_dup(mrb, src));
-    mrb_iv_set(mrb, self, mrb_intern_lit(mrb, "@options"), mrb_fixnum_value(flags));
+    if (!mrb_nil_p(err)) raise_with(mrb, names(mrb).error, err);
+    mrb_iv_set(mrb, self, names(mrb).source, mrb_str_dup(mrb, src));
+    mrb_iv_set(mrb, self, names(mrb).options, mrb_fixnum_value(flags));
     return self;
 }
+
+// One match data for every match (the offsets of the last one): a match data per Regexp kept the
+// engine's working memory (20 KB from the first match) per pattern object, so a pattern literal in
+// a loop over 100,000 lines held 140 MB until the collector ran. Nothing runs between a match
+// and the reading of its offsets.
+pcre2_match_data* the_md = nullptr;
+uint32_t the_md_pairs = 0;
+pcre2_match_data* match_data(mrb_state* mrb, uint32_t pairs) {
+    if (!the_md || the_md_pairs < pairs) {
+        if (the_md) pcre2_match_data_free(the_md);
+        the_md_pairs = pairs < 10 ? 10 : pairs;
+        the_md = pcre2_match_data_create(the_md_pairs, nullptr);
+        if (!the_md) {
+            the_md_pairs = 0;
+            mrb_raise(mrb, E_RUNTIME_ERROR, "pattern match failed: out of memory");
+        }
+    }
+    return the_md;
+}
+PCRE2_SIZE* ovector() { return pcre2_get_ovector_pointer(the_md); }
 
 // One match context for every match: a pattern from input (Regexp.new(text)) gets at most this
 // much work per call, then RegexpError (audit M7). The engine's own default match limit is 10 times
@@ -668,34 +959,376 @@ Re* get_re(mrb_state* mrb, mrb_value self) {
     return re;
 }
 
+// The kind (utf8_kind) of subject `s`: checked now, or remembered when `s` is the frozen subject
+// checked last (a frozen String cannot change; @__subject keeps it, so its address is not reused).
+// For an invalid subject, re->bad then holds its utf8_bad (for frag_match).
+int subject_kind(mrb_state* mrb, mrb_value self, Re* re, mrb_value s) {
+    const RString* rs = mrb_str_ptr(s);
+    bool frozen = mrb_frozen_p(rs);
+    if (frozen && re->subj == rs && re->sptr == RSTRING_PTR(s) && re->slen == RSTRING_LEN(s)) return re->kind;
+    re->subj = nullptr;
+    int k = utf8_kind(RSTRING_PTR(s), size_t(RSTRING_LEN(s)));
+    if (k < 0 && re->frag) {
+        re->nbad = utf8_bad(RSTRING_PTR(s), size_t(RSTRING_LEN(s)), re->bad, re->badcap);
+        if (re->nbad > re->badcap) {
+            re->bad = static_cast<size_t*>(mrb_realloc(mrb, re->bad, re->nbad * sizeof(size_t)));
+            re->badcap = re->nbad;
+            utf8_bad(RSTRING_PTR(s), size_t(RSTRING_LEN(s)), re->bad, re->badcap);
+        }
+    }
+    if (frozen && RSTRING_LEN(s) >= 256) {
+        mrb_iv_set(mrb, self, names(mrb).subject, s);
+        re->subj = rs;
+        re->sptr = RSTRING_PTR(s);
+        re->slen = RSTRING_LEN(s);
+        re->kind = k;
+    }
+    return k;
+}
+
+// One match at byte `pos`: the number of groups set plus one, or 0 for no match. The engine's
+// offsets are in ovector(). A subject with an invalid sequence, or a start inside a character,
+// matches as with PCRE2_MATCH_INVALID_UTF (what 0.1.3 did on every call): through frag_match, or
+// for a pattern with \A or \G through the engine's own checking code.
+int re_exec(mrb_state* mrb, mrb_value self, Re* re, mrb_value s, int kind, mrb_int pos) {
+    const char* p = RSTRING_PTR(s);
+    mrb_int len = RSTRING_LEN(s);
+    pcre2_code* code = re->code;
+    uint32_t opt = PCRE2_NO_UTF_CHECK;
+    bool odd = kind < 0 || (pos < len && (static_cast<unsigned char>(p[pos]) & 0xC0) == 0x80);
+    int rc;
+    if (odd && re->frag)
+        rc = frag_match(re->code, p, size_t(len), size_t(pos), kind < 0 ? re->bad : nullptr, kind < 0 ? re->nbad : 0,
+                        re->lookbehind, match_data(mrb, re->groups + 1), match_context());
+    else {
+        if (odd) {
+            if (!re->inv) {
+                mrb_value err = re_compile(mrb, mrb_iv_get(mrb, self, names(mrb).source),
+                                           re->opts | PCRE2_MATCH_INVALID_UTF, &re->inv);
+                if (!re->inv) raise_with(mrb, names(mrb).error, err);
+            }
+            code = re->inv;
+            opt = 0;
+        }
+        rc = pcre2_match(code, reinterpret_cast<PCRE2_SPTR>(p), size_t(len), size_t(pos), opt, match_data(mrb, re->groups + 1),
+                         match_context());
+    }
+    if (rc == PCRE2_ERROR_NOMATCH) return 0;
+    if (rc < 0) {
+        if (rc == PCRE2_ERROR_MATCHLIMIT || rc == PCRE2_ERROR_DEPTHLIMIT || rc == PCRE2_ERROR_HEAPLIMIT)
+            mrb_raise(mrb, names(mrb).error,
+                      "the pattern is too complex for this text (it needs more than the match limit); make it simpler");
+        PCRE2_UCHAR buf[256];
+        pcre2_get_error_message(rc, buf, sizeof buf);
+        mrb_raisef(mrb, E_RUNTIME_ERROR, "pattern match failed: %s", reinterpret_cast<char*>(buf));
+    }
+    return rc == 0 ? int(re->groups) + 1 : rc;
+}
+
+// Byte offsets of group g of the last match, or false when the group took no part.
+bool group(int rc, uint32_t g, mrb_int& b, mrb_int& e) {
+    PCRE2_SIZE* ov = ovector();
+    if (int(g) >= rc || ov[2 * g] == PCRE2_UNSET) return false;
+    b = static_cast<mrb_int>(ov[2 * g]);
+    e = static_cast<mrb_int>(ov[2 * g + 1]);
+    return true;
+}
+
+// [b0, e0, b1, e1, ...] of the last match (-1 for groups that took no part).
+mrb_value offsets(mrb_state* mrb, Re* re, int rc) {
+    mrb_value r = mrb_ary_new_capa(mrb, 2 * (re->groups + 1));
+    for (uint32_t g = 0; g <= re->groups; ++g) {
+        mrb_int b = -1, e = -1;
+        group(rc, g, b, e);
+        mrb_ary_push(mrb, r, mrb_fixnum_value(b));
+        mrb_ary_push(mrb, r, mrb_fixnum_value(e));
+    }
+    return r;
+}
+
+// The text of group g of the last match, or nil.
+mrb_value group_str(mrb_state* mrb, int rc, mrb_value s, uint32_t g) {
+    mrb_int b, e;
+    if (!group(rc, g, b, e)) return mrb_nil_value();
+    return mrb_str_byte_subseq(mrb, s, b, e - b);
+}
+
+// $~ and $1..$9 from a MatchData (nil: all nil), as Rsh.__set_match does from Ruby.
+void set_last(mrb_state* mrb, mrb_value md) {
+    const ReNames& n = names(mrb);
+    mrb_gv_set(mrb, n.last, md);
+    mrb_value offs = mrb_nil_value(), s = mrb_nil_value();
+    if (!mrb_nil_p(md)) {
+        offs = mrb_iv_get(mrb, md, n.offsets);
+        s = mrb_iv_get(mrb, md, n.string);
+    }
+    for (mrb_int k = 1; k <= 9; ++k) {
+        mrb_value v = mrb_nil_value();
+        if (mrb_array_p(offs) && mrb_string_p(s) && 2 * k + 1 < RARRAY_LEN(offs)) {
+            mrb_value vb = mrb_ary_ref(mrb, offs, 2 * k), ve = mrb_ary_ref(mrb, offs, 2 * k + 1);
+            mrb_int b = mrb_integer_p(vb) ? mrb_integer(vb) : -1, e = mrb_integer_p(ve) ? mrb_integer(ve) : -1;
+            if (b >= 0 && e >= b && e <= RSTRING_LEN(s)) v = mrb_str_byte_subseq(mrb, s, b, e - b);
+        }
+        mrb_gv_set(mrb, n.nth[k], v);
+    }
+}
+
+// A MatchData for the last match, built without running Ruby code.
+mrb_value make_md(mrb_state* mrb, mrb_value self, Re* re, int rc, mrb_value s) {
+    const ReNames& n = names(mrb);
+    RObject* o = reinterpret_cast<RObject*>(mrb_obj_alloc(mrb, MRB_TT_OBJECT, n.match_data));
+    mrb_value md = mrb_obj_value(o);
+    mrb_iv_set(mrb, md, n.regexp, self);
+    mrb_iv_set(mrb, md, n.string, s);
+    mrb_iv_set(mrb, md, n.offsets, offsets(mrb, re, rc));
+    return md;
+}
+
+mrb_int check_pos(mrb_value s, mrb_int pos) { return pos < 0 || pos > RSTRING_LEN(s) ? -1 : pos; }
+
 // __match(str, byte_pos) -> [b0, e0, b1, e1, ...] (-1 for groups that took no part) or nil
 mrb_value m_re_match(mrb_state* mrb, mrb_value self) {
     mrb_value s;
     mrb_int pos;
     mrb_get_args(mrb, "Si", &s, &pos);
     Re* re = get_re(mrb, self);
-    if (pos < 0 || pos > RSTRING_LEN(s)) return mrb_nil_value();
-    int rc = pcre2_match(re->code, reinterpret_cast<PCRE2_SPTR>(RSTRING_PTR(s)), size_t(RSTRING_LEN(s)), size_t(pos), 0,
-                         re->md, match_context());
-    if (rc < 0) {
-        if (rc == PCRE2_ERROR_NOMATCH) return mrb_nil_value();
-        if (rc == PCRE2_ERROR_MATCHLIMIT || rc == PCRE2_ERROR_DEPTHLIMIT || rc == PCRE2_ERROR_HEAPLIMIT)
-            mrb_raise(mrb, mrb_class_get(mrb, "RegexpError"),
-                      "the pattern is too complex for this text (it needs more than the match limit); make it simpler");
-        PCRE2_UCHAR buf[256];
-        pcre2_get_error_message(rc, buf, sizeof buf);
-        mrb_raisef(mrb, E_RUNTIME_ERROR, "pattern match failed: %s", reinterpret_cast<char*>(buf));
+    if (check_pos(s, pos) < 0) return mrb_nil_value();
+    int rc = re_exec(mrb, self, re, s, subject_kind(mrb, self, re, s), pos);
+    return rc ? offsets(mrb, re, rc) : mrb_nil_value();
+}
+
+// __test(str, byte_pos) -> true or false (match?: no MatchData, $~ untouched)
+mrb_value m_re_test(mrb_state* mrb, mrb_value self) {
+    mrb_value s;
+    mrb_int pos;
+    mrb_get_args(mrb, "Si", &s, &pos);
+    Re* re = get_re(mrb, self);
+    if (check_pos(s, pos) < 0) return mrb_false_value();
+    return mrb_bool_value(re_exec(mrb, self, re, s, subject_kind(mrb, self, re, s), pos) != 0);
+}
+
+// __md(str, byte_pos, reset) -> MatchData or nil; sets $~ and $1..$9 on a match, and to nil on
+// no match when `reset` (match); a loop passes false and keeps the last match.
+mrb_value m_re_md(mrb_state* mrb, mrb_value self) {
+    mrb_value s;
+    mrb_int pos;
+    mrb_bool reset;
+    mrb_get_args(mrb, "Sib", &s, &pos, &reset);
+    Re* re = get_re(mrb, self);
+    int rc = check_pos(s, pos) < 0 ? 0 : re_exec(mrb, self, re, s, subject_kind(mrb, self, re, s), pos);
+    mrb_value md = rc ? make_md(mrb, self, re, rc, s) : mrb_nil_value();
+    if (rc || reset) set_last(mrb, md);
+    return md;
+}
+
+// __eqtilde(str) -> the character index of the match, or nil; sets $~ and $1..$9 (=~)
+mrb_value m_re_eqtilde(mrb_state* mrb, mrb_value self) {
+    mrb_value s;
+    mrb_get_args(mrb, "S", &s);
+    Re* re = get_re(mrb, self);
+    int kind = subject_kind(mrb, self, re, s);
+    int rc = re_exec(mrb, self, re, s, kind, 0);
+    if (!rc) {
+        set_last(mrb, mrb_nil_value());
+        return mrb_nil_value();
     }
-    uint32_t groups;
-    pcre2_pattern_info(re->code, PCRE2_INFO_CAPTURECOUNT, &groups);
-    PCRE2_SIZE* ov = pcre2_get_ovector_pointer(re->md);
-    mrb_value r = mrb_ary_new_capa(mrb, 2 * (groups + 1));
-    for (uint32_t g = 0; g <= groups; ++g) {
-        bool set = int(g) < rc && ov[2 * g] != PCRE2_UNSET;
-        mrb_ary_push(mrb, r, mrb_fixnum_value(set ? (mrb_int)ov[2 * g] : -1));
-        mrb_ary_push(mrb, r, mrb_fixnum_value(set ? (mrb_int)ov[2 * g + 1] : -1));
+    mrb_int b = static_cast<mrb_int>(ovector()[0]);
+    set_last(mrb, make_md(mrb, self, re, rc, s));
+    return mrb_fixnum_value(char_count(RSTRING_PTR(s), b, kind));
+}
+
+// Regexp.__chars(str, byte_pos) -> the character index of byte_pos (MatchData#begin and #end)
+mrb_value m_re_chars(mrb_state* mrb, mrb_value) {
+    mrb_value s;
+    mrb_int b;
+    mrb_get_args(mrb, "Si", &s, &b);
+    if (b < 0 || b > RSTRING_LEN(s)) return mrb_nil_value();
+    return mrb_fixnum_value(char_count(RSTRING_PTR(s), b, utf8_kind(RSTRING_PTR(s), size_t(b))));
+}
+
+// Regexp.__set_last(md): $~ and $1..$9 from md (or nil)
+mrb_value m_re_set_last(mrb_state* mrb, mrb_value) {
+    mrb_value md;
+    mrb_get_args(mrb, "o", &md);
+    set_last(mrb, md);
+    return md;
+}
+
+// __scan(str) -> the matches (a String each, or an Array of the groups); $~ the last match (left
+// as it was when there is none). The loop of String#scan without a block.
+mrb_value m_re_scan(mrb_state* mrb, mrb_value self) {
+    mrb_value s;
+    mrb_get_args(mrb, "S", &s);
+    Re* re = get_re(mrb, self);
+    int kind = subject_kind(mrb, self, re, s);
+    mrb_value found = mrb_ary_new(mrb);
+    mrb_int pos = 0, bytes = RSTRING_LEN(s);
+    int ai = mrb_gc_arena_save(mrb);
+    int last = 0;
+    mrb_int lastpos = 0;
+    while (pos <= bytes) {
+        int rc = re_exec(mrb, self, re, s, kind, pos);
+        if (!rc) break;
+        last = rc;
+        lastpos = pos;
+        if (re->groups == 0) mrb_ary_push(mrb, found, group_str(mrb, rc, s, 0));
+        else {
+            mrb_value caps = mrb_ary_new_capa(mrb, re->groups);
+            for (uint32_t g = 1; g <= re->groups; ++g) mrb_ary_push(mrb, caps, group_str(mrb, rc, s, g));
+            mrb_ary_push(mrb, found, caps);
+        }
+        mrb_gc_arena_restore(mrb, ai);
+        PCRE2_SIZE* ov = ovector();
+        pos = ov[1] == ov[0] ? static_cast<mrb_int>(ov[1]) + 1 : static_cast<mrb_int>(ov[1]);
     }
-    return r;
+    if (last) {  // the last match again: its offsets were overwritten by the failed try
+        int rc = re_exec(mrb, self, re, s, kind, lastpos);
+        set_last(mrb, make_md(mrb, self, re, rc, s));
+    }
+    return found;
+}
+
+// __split(str, limit) -> the parts (String#split with a pattern; $~ untouched)
+mrb_value m_re_split(mrb_state* mrb, mrb_value self) {
+    mrb_value s;
+    mrb_int limit;
+    mrb_get_args(mrb, "Si", &s, &limit);
+    Re* re = get_re(mrb, self);
+    int kind = subject_kind(mrb, self, re, s);
+    mrb_value parts = mrb_ary_new(mrb);
+    mrb_int pos = 0, search = 0, bytes = RSTRING_LEN(s);
+    int ai = mrb_gc_arena_save(mrb);
+    while (search <= bytes && (limit <= 0 || RARRAY_LEN(parts) < limit - 1)) {
+        int rc = re_exec(mrb, self, re, s, kind, search);
+        if (!rc) break;
+        mrb_int b, e;
+        group(rc, 0, b, e);
+        if (e == b) {
+            if (b >= bytes) break;
+            if (b == pos) {
+                search = b + 1;
+                continue;
+            }
+        }
+        mrb_ary_push(mrb, parts, mrb_str_byte_subseq(mrb, s, pos, b - pos));
+        for (uint32_t g = 1; g <= re->groups; ++g) {
+            mrb_int gb, ge;
+            if (group(rc, g, gb, ge)) mrb_ary_push(mrb, parts, mrb_str_byte_subseq(mrb, s, gb, ge - gb));
+        }
+        mrb_gc_arena_restore(mrb, ai);
+        pos = e;
+        search = e == b ? e + 1 : e;
+    }
+    mrb_ary_push(mrb, parts, mrb_str_byte_subseq(mrb, s, pos, bytes - pos));
+    if (limit == 0) {
+        mrb_int n = RARRAY_LEN(parts);
+        while (n > 0 && RSTRING_LEN(mrb_ary_ref(mrb, parts, n - 1)) == 0) --n;
+        mrb_ary_resize(mrb, parts, n);
+    }
+    return parts;
+}
+
+// The number of the group called name[0, n) (the last one, as MatchData#[] finds it), or -1.
+int name_number(Re* re, const char* name, size_t n) {
+    uint32_t count, size;
+    PCRE2_SPTR table;
+    pcre2_pattern_info(re->code, PCRE2_INFO_NAMECOUNT, &count);
+    pcre2_pattern_info(re->code, PCRE2_INFO_NAMEENTRYSIZE, &size);
+    pcre2_pattern_info(re->code, PCRE2_INFO_NAMETABLE, &table);
+    int found = -1;
+    for (uint32_t k = 0; k < count; ++k) {
+        PCRE2_SPTR e = table + k * size;
+        const char* en = reinterpret_cast<const char*>(e + 2);
+        if (std::strlen(en) == n && !std::memcmp(en, name, n)) found = (e[0] << 8) | e[1];
+    }
+    return found;
+}
+
+// Appends group g of the last match to out (nothing when it took no part).
+void cat_group(mrb_state* mrb, Re* re, int rc, mrb_value s, mrb_int g, mrb_value out) {
+    mrb_int b, e;
+    if (g >= 0 && g <= static_cast<mrb_int>(re->groups) && group(rc, uint32_t(g), b, e)) mrb_str_cat(mrb, out, RSTRING_PTR(s) + b, size_t(e - b));
+}
+
+// The replacement text of sub/gsub for the last match: \0..\9, \&, \\ and \k<name>; any other
+// byte as written (String#__rsh_expand in 0.1.3, the same rules).
+void expand(mrb_state* mrb, Re* re, int rc, mrb_value s, mrb_value rep, mrb_value out) {
+    const char* r = RSTRING_PTR(rep);
+    mrb_int n = RSTRING_LEN(rep), i = 0, lit = 0;
+    while (i < n) {
+        if (r[i] != '\\' || i + 1 >= n) {
+            ++i;
+            continue;
+        }
+        char d = r[i + 1];
+        mrb_int skip = 0;
+        if (d >= '0' && d <= '9') {
+            mrb_str_cat(mrb, out, r + lit, size_t(i - lit));
+            cat_group(mrb, re, rc, s, d - '0', out);
+            skip = 2;
+        } else if (d == '&') {
+            mrb_str_cat(mrb, out, r + lit, size_t(i - lit));
+            cat_group(mrb, re, rc, s, 0, out);
+            skip = 2;
+        } else if (d == '\\') {
+            mrb_str_cat(mrb, out, r + lit, size_t(i - lit));
+            mrb_str_cat_lit(mrb, out, "\\");
+            skip = 2;
+        } else if (d == 'k' && i + 2 < n && r[i + 2] == '<') {
+            const void* gt = std::memchr(r + i + 3, '>', size_t(n - i - 3));
+            if (gt) {
+                mrb_int e = static_cast<const char*>(gt) - r;
+                int g = name_number(re, r + i + 3, size_t(e - i - 3));
+                if (g < 0) {
+                    mrb_value m = mrb_str_new_lit(mrb, "undefined group name reference: ");
+                    mrb_str_cat(mrb, m, r + i + 3, size_t(e - i - 3));
+                    raise_with(mrb, E_INDEX_ERROR, m);
+                }
+                mrb_str_cat(mrb, out, r + lit, size_t(i - lit));
+                cat_group(mrb, re, rc, s, g, out);
+                skip = e + 1 - i;
+            }
+        }
+        if (skip) {
+            i += skip;
+            lit = i;
+        } else ++i;
+    }
+    mrb_str_cat(mrb, out, r + lit, size_t(n - lit));
+}
+
+// __sub(str, rep, global) -> the new String (sub/gsub with a String replacement); $~ the last
+// match, nil when there is none.
+mrb_value m_re_sub(mrb_state* mrb, mrb_value self) {
+    mrb_value s, rep;
+    mrb_bool global;
+    mrb_get_args(mrb, "SSb", &s, &rep, &global);
+    Re* re = get_re(mrb, self);
+    int kind = subject_kind(mrb, self, re, s);
+    const char* p = RSTRING_PTR(s);
+    mrb_int pos = 0, bytes = RSTRING_LEN(s), lastpos = -1;
+    mrb_value out = mrb_str_new_capa(mrb, size_t(bytes));
+    bool plain = !std::memchr(RSTRING_PTR(rep), '\\', size_t(RSTRING_LEN(rep)));
+    while (pos <= bytes) {
+        int rc = re_exec(mrb, self, re, s, kind, pos);
+        if (!rc) break;
+        lastpos = pos;
+        mrb_int b, e;
+        group(rc, 0, b, e);
+        mrb_str_cat(mrb, out, p + pos, size_t(b - pos));
+        if (plain) mrb_str_cat_str(mrb, out, rep);
+        else expand(mrb, re, rc, s, rep, out);
+        if (e == b) {
+            if (e < bytes) mrb_str_cat(mrb, out, p + e, 1);
+            pos = e + 1;
+        } else pos = e;
+        if (!global) break;
+    }
+    if (pos < bytes) mrb_str_cat(mrb, out, p + pos, size_t(bytes - pos));
+    mrb_value md = mrb_nil_value();
+    if (lastpos >= 0) md = make_md(mrb, self, re, re_exec(mrb, self, re, s, kind, lastpos), s);
+    set_last(mrb, md);
+    return out;
 }
 
 mrb_value names_of(mrb_state* mrb, Re* re, const char* want, mrb_int* index) {
@@ -725,8 +1358,8 @@ mrb_value m_re_name_index(mrb_state* mrb, mrb_value self) {
     return idx < 0 ? mrb_nil_value() : mrb_fixnum_value(idx);
 }
 
-mrb_value m_re_source(mrb_state* mrb, mrb_value self) { return mrb_iv_get(mrb, self, mrb_intern_lit(mrb, "@source")); }
-mrb_value m_re_options(mrb_state* mrb, mrb_value self) { return mrb_iv_get(mrb, self, mrb_intern_lit(mrb, "@options")); }
+mrb_value m_re_source(mrb_state* mrb, mrb_value self) { return mrb_iv_get(mrb, self, names(mrb).source); }
+mrb_value m_re_options(mrb_state* mrb, mrb_value self) { return mrb_iv_get(mrb, self, names(mrb).options); }
 
 // ---- JSON ---------------------------------------------------------------------------------------
 
@@ -1064,10 +1697,19 @@ mrb_state* rt_open(const std::string& script, const std::vector<std::string>& ar
     mrb_define_module_function(mrb, r, "__regexp", m_regexp, MRB_ARGS_NONE());
     mrb_define_module_function(mrb, r, "__home", m_home, MRB_ARGS_REQ(1));
     mrb_define_class_method(mrb, mrb_class_get(mrb, "File"), "mtime", m_file_mtime, MRB_ARGS_REQ(1));
+    re_names.owner = nullptr;  // a new interpreter: its own symbols
     RClass* re = mrb_define_class(mrb, "Regexp", mrb->object_class);
     MRB_SET_INSTANCE_TT(re, MRB_TT_CDATA);
     mrb_define_method(mrb, re, "initialize", m_re_init, MRB_ARGS_ARG(1, 1));
     mrb_define_method(mrb, re, "__match", m_re_match, MRB_ARGS_REQ(2));
+    mrb_define_method(mrb, re, "__test", m_re_test, MRB_ARGS_REQ(2));
+    mrb_define_method(mrb, re, "__md", m_re_md, MRB_ARGS_REQ(3));
+    mrb_define_method(mrb, re, "__eqtilde", m_re_eqtilde, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, re, "__scan", m_re_scan, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, re, "__split", m_re_split, MRB_ARGS_REQ(2));
+    mrb_define_method(mrb, re, "__sub", m_re_sub, MRB_ARGS_REQ(3));
+    mrb_define_class_method(mrb, re, "__set_last", m_re_set_last, MRB_ARGS_REQ(1));
+    mrb_define_class_method(mrb, re, "__chars", m_re_chars, MRB_ARGS_REQ(2));
     mrb_define_method(mrb, re, "names", m_re_names, MRB_ARGS_NONE());
     mrb_define_method(mrb, re, "__name_index", m_re_name_index, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, re, "source", m_re_source, MRB_ARGS_NONE());
@@ -1084,6 +1726,7 @@ mrb_state* rt_open(const std::string& script, const std::vector<std::string>& ar
     for (auto& a : args) mrb_ary_push(mrb, av, str(mrb, a));
     mrb_define_global_const(mrb, "ARGV", av);
     mrb_gv_set(mrb, mrb_intern_lit(mrb, "$0"), str(mrb, script));
+    mrb_gv_set(mrb, mrb_intern_lit(mrb, "$PROGRAM_NAME"), str(mrb, script));  // L-5
     mrb_gv_set(mrb, mrb_intern_lit(mrb, "$*"), av);
     return mrb;
 }
@@ -1105,8 +1748,9 @@ int rt_run(mrb_state* mrb, const std::string& src, const std::string& file, bool
             // the compiler says "line N: ...": put the file in front, like every other message
             mrb_value msg = mrb_funcall(mrb, e, "message", 0);
             std::string m = mrb_string_p(msg) ? cxx(msg) : "syntax error";
-            if (m.compare(0, 5, "line ") == 0) m = m.substr(5);
-            std::fprintf(stderr, "rsh: %s:%s\n", file.c_str(), m.c_str());
+            // Rsh.eval's errors name their own text, "(rsh eval):1: ..." (audit L-9)
+            if (m.compare(0, 5, "line ") == 0) std::fprintf(stderr, "rsh: %s:%s\n", file.c_str(), m.c_str() + 5);
+            else std::fprintf(stderr, "rsh: %s\n", m.c_str());
             return 2;
         }
         return report(mrb, e);
@@ -1215,6 +1859,7 @@ int rt_check(mrb_state* mrb, const std::string& src, const std::string& file, bo
     if (bad || !lint) return bad;
     // Warnings: words taken as commands that are not on PATH, and risky forms.
     int warn = 0;
+    for (auto& d : r.diags) warn += d.warning;  // the reader's own (printed above), 0.1.4
     for (size_t li = before; li < table().size(); ++li) {
         const Line& L = table()[li];
         for (auto& it : L.items)
@@ -1239,6 +1884,17 @@ int rt_check(mrb_state* mrb, const std::string& src, const std::string& file, bo
                     std::fprintf(stderr, "%s:%d: warning: a value is the first argument of %s; if it starts with - it is read as an option: write %s -- #{...}\n",
                                  file.c_str(), L.line, name.c_str(), name.c_str());
                     ++warn;
+                }
+                // A fixed name under /tmp as the file a redirect writes (echo > /tmp/x, audit L-15).
+                for (auto& rd : cmd.redirs) {
+                    if (rd.k != Redir::Out && rd.k != Redir::Append && rd.k != Redir::Both && rd.k != Redir::BothAppend) continue;
+                    std::string lit;
+                    for (auto& part : rd.target.parts)
+                        if (part.k == Part::Lit || part.k == Part::Pat) lit += part.s;
+                    if (lit.compare(0, 5, "/tmp/") == 0 && lit.size() > 5) {
+                        std::fprintf(stderr, "%s:%d: warning: a fixed name under /tmp; use mktemp\n", file.c_str(), L.line);
+                        ++warn;
+                    }
                 }
                 bool shell_c = (name == "sh" || name == "bash" || name == "zsh") && cmd.words.size() > 1;
                 for (size_t k2 = 1; k2 < cmd.words.size(); ++k2) {

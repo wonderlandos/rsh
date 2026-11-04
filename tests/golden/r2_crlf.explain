@@ -1,0 +1,9 @@
+mode: shell
+   1 R  # 0.1.4 (audit R2-5): a file with CR LF line ends
+   2 C  cat <<EOT
+   3 R  body line
+   4 R  EOT
+   5 C  echo one \
+   6 R    two
+   7 R  puts "done"
+   8    

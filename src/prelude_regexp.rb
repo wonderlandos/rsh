@@ -4,6 +4,10 @@
 # first needed (Rsh.__regexp: the first Regexp made, or a stand-in in src/prelude.rb), so a script
 # without patterns starts faster. The built-in String methods it wraps are kept as __rsh_plain_* by
 # src/prelude.rb.
+# The loops (scan, split, sub and gsub with a String) and the single matches (=~, match, match?)
+# run in C++ (src/rt.cpp: __scan, __split, __sub, __eqtilde, __md, __test), which also sets $~ and
+# $1..$9; what is left here calls a block or a Hash per match, on a frozen copy of the subject so
+# that its UTF-8 check is done once (audit H-1, M-10).
 
 class MatchData
   attr_reader :regexp, :string
@@ -12,6 +16,10 @@ class MatchData
     @regexp = regexp
     @string = string
     @offsets = offsets
+  end
+
+  def __offsets
+    @offsets
   end
 
   def __index(key)
@@ -42,20 +50,32 @@ class MatchData
 
   def begin(key)
     b = @offsets[2 * __index(key)]
-    b < 0 ? nil : @string.byteslice(0, b).size
+    b < 0 ? nil : Regexp.__chars(@string, b)
   end
 
   def end(key)
     e = @offsets[2 * __index(key) + 1]
-    e < 0 ? nil : @string.byteslice(0, e).size
+    e < 0 ? nil : Regexp.__chars(@string, e)
   end
 
   def to_a
-    (0...size).map { |i| self[i] }
+    __groups(0)
   end
 
   def captures
-    to_a.drop(1)
+    __groups(1)
+  end
+
+  def __groups(from)
+    out = []
+    i = from
+    n = @offsets.size
+    while 2 * i < n
+      b = @offsets[2 * i]
+      out << (b < 0 ? nil : @string.byteslice(b, @offsets[2 * i + 1] - b))
+      i += 1
+    end
+    out
   end
 
   def names
@@ -90,8 +110,8 @@ class MatchData
 end
 
 class Regexp
-  def self.compile(*args)
-    new(*args)
+  class << self
+    alias compile new
   end
 
   def self.escape(text)
@@ -113,14 +133,11 @@ class Regexp
 
   def match(str, pos = 0)
     if str.nil?
-      Rsh.__set_match(nil, [])
+      Regexp.__set_last(nil)
       return nil
     end
     str = str.to_s
-    bpos = pos <= 0 ? 0 : str[0, pos].to_s.bytesize
-    offs = __match(str, bpos)
-    md = offs ? MatchData.new(self, str, offs) : nil
-    Rsh.__set_match(md, md ? md.captures.first(9) : [])
+    md = __md(str, pos <= 0 ? 0 : str[0, pos].to_s.bytesize, true)
     if md && block_given?
       yield md
     else
@@ -130,12 +147,16 @@ class Regexp
 
   def match?(str, pos = 0)
     return false if str.nil?
-    !__match(str.to_s, pos <= 0 ? 0 : str[0, pos].to_s.bytesize).nil?
+    str = str.to_s
+    __test(str, pos <= 0 ? 0 : str[0, pos].to_s.bytesize)
   end
 
   def =~(str)
-    md = match(str)
-    md && md.begin(0)
+    if str.nil?
+      Regexp.__set_last(nil)
+      return nil
+    end
+    __eqtilde(str.to_s)
   end
 
   # case/when sets $~ and $1... as =~ does.
@@ -186,69 +207,35 @@ class String
     pattern.match?(self, pos)
   end
 
-  def __rsh_expand(rep, md)
-    out = ""
-    i = 0
-    while i < rep.size
-      c = rep[i]
-      d = rep[i + 1]
-      if c == "\\" && d
-        if d >= "0" && d <= "9"
-          out << md[d.to_i].to_s
-          i += 2
-          next
-        elsif d == "&"
-          out << md[0]
-          i += 2
-          next
-        elsif d == "\\"
-          out << "\\"
-          i += 2
-          next
-        elsif d == "k" && rep[i + 2] == "<"
-          e = rep.__rsh_plain_index(">", i + 3)
-          if e
-            out << md[rep[(i + 3)...e]].to_s
-            i = e + 1
-            next
-          end
-        end
-      end
-      out << c
-      i += 1
-    end
-    out
+  # The subject the Ruby loops match on: frozen, so the engine's UTF-8 check is remembered.
+  def __rsh_subject
+    frozen? ? self : dup.freeze
   end
 
   def __rsh_replace(pattern, rep, global, &block)
+    return pattern.__sub(self, rep.to_s, global) unless (block && rep.nil?) || rep.is_a?(Hash)
+    subj = __rsh_subject
     out = ""
     pos = 0
     last = nil
-    bytes = bytesize
+    bytes = subj.bytesize
     while pos <= bytes
-      offs = pattern.__match(self, pos)
-      break unless offs
-      md = MatchData.new(pattern, self, offs)
+      md = pattern.__md(subj, pos, false)
+      break unless md
+      offs = md.__offsets
       last = md
-      out << byteslice(pos, offs[0] - pos)
-      Rsh.__set_match(md, md.captures.first(9))
-      out << if block && rep.nil?
-               block.call(md[0]).to_s
-             elsif rep.is_a?(Hash)
-               rep[md[0]].to_s
-             else
-               __rsh_expand(rep.to_s, md)
-             end
+      out << subj.byteslice(pos, offs[0] - pos)
+      out << (rep.is_a?(Hash) ? rep[md[0]] : block.call(md[0])).to_s
       if offs[1] == offs[0]
-        out << byteslice(offs[1], 1).to_s if offs[1] < bytes
+        out << subj.byteslice(offs[1], 1).to_s if offs[1] < bytes
         pos = offs[1] + 1
       else
         pos = offs[1]
       end
       break unless global
     end
-    out << byteslice(pos, bytes - pos).to_s if pos < bytes
-    Rsh.__set_match(last, last ? last.captures.first(9) : [])
+    out << subj.byteslice(pos, bytes - pos).to_s if pos < bytes
+    Regexp.__set_last(last)
     out
   end
 
@@ -274,47 +261,23 @@ class String
 
   def scan(pattern, &block)
     pattern = Regexp.new(Regexp.escape(pattern)) if pattern.is_a?(String)
-    found = []
+    return pattern.__scan(self) unless block
+    subj = __rsh_subject
     pos = 0
-    bytes = bytesize
+    bytes = subj.bytesize
     while pos <= bytes
-      offs = pattern.__match(self, pos)
-      break unless offs
-      md = MatchData.new(pattern, self, offs)
-      Rsh.__set_match(md, md.captures.first(9))
-      item = md.size > 1 ? md.captures : md[0]
-      block ? block.call(item) : found << item
+      md = pattern.__md(subj, pos, false)
+      break unless md
+      offs = md.__offsets
+      block.call(md.size > 1 ? md.captures : md[0])
       pos = offs[1] == offs[0] ? offs[1] + 1 : offs[1]
     end
-    block ? self : found
+    self
   end
 
   def split(pattern = nil, limit = 0)
     return __rsh_plain_split(pattern, limit) unless pattern.is_a?(Regexp)
-    parts = []
-    pos = 0
-    bytes = bytesize
-    search = 0
-    while search <= bytes && (limit <= 0 || parts.size < limit - 1)
-      offs = pattern.__match(self, search)
-      break unless offs
-      if offs[1] == offs[0]
-        break if offs[0] >= bytes
-        if offs[0] == pos
-          search = offs[0] + 1
-          next
-        end
-      end
-      parts << byteslice(pos, offs[0] - pos)
-      (1...(offs.size / 2)).each do |g|
-        parts << byteslice(offs[2 * g], offs[2 * g + 1] - offs[2 * g]) if offs[2 * g] >= 0
-      end
-      pos = offs[1]
-      search = offs[1] == offs[0] ? offs[1] + 1 : offs[1]
-    end
-    parts << byteslice(pos, bytes - pos).to_s
-    parts.pop while limit == 0 && !parts.empty? && parts.last.empty?
-    parts
+    pattern.__split(self, limit)
   end
 
   def index(pattern, pos = 0)

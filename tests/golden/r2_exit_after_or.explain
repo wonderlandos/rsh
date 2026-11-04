@@ -1,0 +1,35 @@
+mode: shell
+methods: check
+   1 R  # 0.1.4 (audit R2-7): after && or || a Ruby control word ends the command line; the rest is Ruby.
+   2 R  def check(dir)
+   3 C    ls #{dir} >/dev/null 2>&1 || return "missing #{dir}"
+   4 R    "found #{dir}"
+   5 R  end
+   6 R  puts check("/")
+   7 R  puts check("/no/such/dir")
+   8 R  begin
+   9 C    sh -c "exit 3" || raise "it failed with #{$?.exitstatus}"
+  10 R  rescue RuntimeError => e
+  11 R    puts e.message
+  12 R  end
+  13 C  sh -c "exit 1" || :
+  14 R  puts "after || : the status is #{$?.exitstatus}"
+  15 R  [1, 2, 3].each do |n|
+  16 C    test #{n} -eq 2 && next
+  17 R    puts "item #{n}"
+  18 R  end
+  19 R  x = 0
+  20 R  loop do
+  21 R    x += 1
+  22 C    test #{x} -lt 3 || break
+  23 R  end
+  24 R  puts "loop ended at #{x}"
+  25 R  begin
+  26 C    ls /no/such/dir 2>/dev/null ||
+  27 R      raise("the Ruby may go on the next line")
+  28 R  rescue RuntimeError => e
+  29 R    puts e.message
+  30 R  end
+  31 C  ls / >/dev/null && exit 7
+  32 R  puts "not reached"
+  33    

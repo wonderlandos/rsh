@@ -1,0 +1,4 @@
+mode: shell
+   1 R  puts "a BOM before Ruby (audit R2-6)"
+   2 C  echo and a command line
+   3    

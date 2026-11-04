@@ -1,0 +1,9 @@
+found /
+missing /no/such/dir
+it failed with 3
+after || : the status is 1
+item 1
+item 3
+loop ended at 3
+the Ruby may go on the next line
+status: 7

@@ -25,6 +25,12 @@ struct Editor {
 };
 
 size_t visible_width(const std::string& s);
+// Completion (0.1.4): where the typed word at `pos` starts, the word without its quotes, and a name
+// written as one command-line word (backslashes; single quotes when it holds a control byte; a
+// leading ~ kept as the home folder with `keep_tilde`).
+size_t word_start(const std::string& line, size_t pos);
+std::string unquote_word(const std::string& w);
+std::string quote_word(const std::string& name, bool keep_tilde = false);
 // Text from outside (file names, the current folder, history) made safe to write to a terminal:
 // control bytes as ^X (^? for 0x7f), C1 controls and bytes that are not UTF-8 as \xNN (audit M3).
 std::string printable(const std::string& s);

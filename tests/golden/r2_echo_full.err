@@ -1,0 +1,3 @@
+rsh: echo: write error: No space left on device
+rsh: pwd: write error: No space left on device
+rsh: type: write error: No space left on device

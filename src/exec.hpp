@@ -75,6 +75,11 @@ std::string home_of_uid(uid_t uid);
 std::string current_dir();
 // Jobs that ended since the last call, as "[1]+ Done  text" lines (interactive).
 void report_jobs();
+// Jobs started with & (or stopped) that have not ended.
+int running_jobs();
+// TERM or HUP came to the shell while it waits for a foreground command: the command gets it too
+// (async-signal-safe; the shell then ends at its next safe point, with `ensure` and `at_exit` run).
+void forward_to_foreground(int sig);
 void setup_interactive();
 
 // Expands one word into arguments (tests use this).

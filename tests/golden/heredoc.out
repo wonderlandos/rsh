@@ -5,4 +5,5 @@ stripped a b
 PIPED A B
 to a file
 classified after: a b
+printf "%s\n" C:\Users $HOME \ #{not a value} ab
 status: 0

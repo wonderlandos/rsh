@@ -1,0 +1,5 @@
+mode: ruby (the shell layer is off: `# rsh: ruby` on the first line)
+   1 R  # rsh: ruby
+   2 R  # 0.1.4 (audit R2-6): a byte-order mark before the mode comment; the mode is still seen
+   3 R  puts "plain Ruby"
+   4    
