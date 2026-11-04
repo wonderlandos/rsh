@@ -212,6 +212,8 @@ cli "a NUL byte in the source is named, not written raw (L-12)" '"$rsh" "$tmp/cl
 cli "--lint: a fixed name under /tmp as a redirect target (L-15)" '"$rsh" --lint -c "echo hi > /tmp/fixed" 2>&1 | grep -q "fixed name under /tmp"'
 cli "an uncaught Rsh.eval syntax error names its text (L-9)" '"$rsh" -c "Rsh.eval(\"x = (\")" 2>&1 | grep -q "^rsh: (rsh eval):1: syntax error"'
 cli "wait for a job that is not there says so (L-13)" '"$rsh" -c "wait 12345" 2>&1 | grep -q "wait: 12345: no such job"'
+cli "STDIN.readlines, gets and each_line take chomp: true (R2-11, QA-RSH-68)" '[ "$(printf "a\nb\n" | "$rsh" -c "p STDIN.readlines(chomp: true)")" = "[\"a\", \"b\"]" ] && [ "$(printf "a\nb\n" | "$rsh" -c "p STDIN.gets(chomp: true)")" = "\"a\"" ] && [ "$(printf "a\nb\n" | "$rsh" -c "STDIN.each_line(chomp: true) { |l| puts l + \"!\" }" | tr "\n" " ")" = "a! b! " ]'
+cli "X=~ cmd stays Ruby, a syntax error that is documented (R2-17, QA-RSH-74)" '"$rsh" -c "X=~ echo 1" 2>&1 | grep -q "syntax error"; [ $? = 0 ]'
 cli "-c with no text says so (L-8)" '"$rsh" -c 2>&1 | grep -q -- "-c needs TEXT"'
 if command -v timeout >/dev/null; then
 	cli "TERM during a Ruby loop runs ensure and at_exit, then ends by the signal (H-2)" \

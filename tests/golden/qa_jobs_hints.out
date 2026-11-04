@@ -1,0 +1,7 @@
+true
+true
+true
+jobs -q: exit 2
+local: exit 127
+declare: exit 127
+status: 0

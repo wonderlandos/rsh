@@ -189,6 +189,35 @@ check.call("R2-16: completion quotes a name with a quote: #{got.inspect}", got.i
 # R2-15: after | the word is a command again.
 got = run.call(["echo x | wc -\t\x15", "echo x | tr\t\x15"])
 check.call("R2-15: completion after | offers commands: #{got.inspect}", got.include?('tr '))
+# R2-15 (QA-RSH-72): many candidates are listed in columns that fit the terminal (80 here), not as
+# one wrapped line, and a long list stops with how many were left out.
+many = File.join(work, 'many')
+Dir.mkdir(many)
+150.times { |i| File.write(File.join(many, format('cand%03d', i)), '') }
+got = run.call(["ls many/cand\t\t\x15"])
+rows = got.split("\r\n").select { |l| l.include?('cand0') }
+check.call("R2-15: candidates in columns within 80: #{rows.map(&:size).inspect}",
+           rows.size > 5 && rows.all? { |l| l.size <= 80 } && rows.first.scan('cand').size > 2)
+check.call("R2-15: a long list says how many it left out: #{got[-200, 200].inspect}", got.include?('50 more'))
+# QA-RSH-52: Tab after `$TER` completes the environment variable.
+got = run.call(["echo $TER\t\r"])
+check.call("QA-RSH-52: $VAR completes: #{got.inspect}", got.include?('echo $TERM ') && got.include?("\nxterm\r\n"))
+# QA-RSH-57: the history file a pty session creates is 0600 (the audit saw 0644 once, never again).
+run.call(["echo hist-mode\r"])
+hf = File.join(home4, '.local/state/rsh/history')
+check.call("QA-RSH-57: a new history file is 0600: #{File.exist?(hf) ? (File.stat(hf).mode & 0o777).to_s(8) : 'missing'}",
+           File.exist?(hf) && (File.stat(hf).mode & 0o777) == 0o600)
+# QA-RSH-71: Ctrl-T swaps, Alt-D cuts a word, Ctrl-Y puts the last cut back, Ctrl-V inserts the next key as text.
+got = run.call(["echo ab\x14\r"])
+check.call("QA-RSH-71: Ctrl-T at the end swaps the last two: #{got.inspect}", got.include?("\nba\r\n"))
+got = run.call(["echo xyz\x02\x02\x14\r"])
+check.call("QA-RSH-71: Ctrl-T in the line swaps the two before the cursor: #{got.inspect}", got.include?("\nyxz\r\n"))
+got = run.call(["echo drop keep\x01\e[C\e[C\e[C\e[C\e[C\ed\r"])
+check.call("QA-RSH-71: Alt-D cuts the word after the cursor: #{got.inspect}", got.include?("\nkeep\r\n") && !got.include?('drop keep'))
+got = run.call(["echo one\x15\x19\x19\r"])
+check.call("QA-RSH-71: Ctrl-U then Ctrl-Y twice: #{got.inspect}", got.include?("\noneecho one\r\n"))
+got = run.call(["echo a\x16\x01b\r"])
+check.call("QA-RSH-71: Ctrl-V inserts the next key as text: #{got.inspect}", got.include?("a\x01b\r\n"))
 # R2-9: an arrow ends a history search and moves in the line found; its bytes are not text.
 got = run.call(["echo second\r", "\x12sec", "\e[D", "X\r"])
 check.call("R2-9: Ctrl-R then Left: #{got.inspect}", got.include?("seconXd\r\n") && !got.include?('[D'))

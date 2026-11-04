@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+QA-100 registry check (rows QA-RSH-24..76, written against 0.1.3): every row but those below was
+already fixed or decided in 0.1.4 and 0.9.x. Each fix below has a test that fails on 0.9.1.
+
+- **QA-RSH-45 (audit L-7)** `echo -E` was printed as text: `-E` now turns the escapes off and a flag group of
+  `n`, `e` and `E` is read as in bash (`-nE`, `-eE`; the last of e and E wins). `echo -e` keeps the
+  backslash of an escape it does not know (`\q`, `\x` with no hex digit), as bash; it dropped it.
+  `tests/golden/qa_echo_flags.rsh`.
+- **QA-RSH-72** Tab with many candidates lists them in columns that fit the terminal (down the columns, as
+  bash), 100 at most and then `... N more`; it was one wrapped line. `tests/interactive.rb`.
+- **QA-RSH-71** Ctrl-T (swap), Alt-D (cut the next word), Ctrl-Y (put back the last cut of Ctrl-K, Ctrl-U,
+  Ctrl-W or Alt-D) and Ctrl-V (the next key is text). `tests/interactive.rb`.
+- **QA-RSH-52** Tab after `$TER` completes environment variables. `tests/interactive.rb`.
+- **QA-RSH-51** `jobs -l` and `jobs -p` (pids); another option is status 2. `tests/golden/qa_jobs_hints.rsh`.
+- **QA-RSH-54** `read`, `local`, `declare`, `typeset`, `shopt`, `let`, when not programs on `PATH`, say in the
+  `command not found` what to write. `tests/golden/qa_jobs_hints.rsh`.
+- **QA-RSH-57** (not reproduced) a new history file made in a pty session is 0600: pinned by `tests/interactive.rb`.
+
 ## 0.9.1
 
 ### Audit 2

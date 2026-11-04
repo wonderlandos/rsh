@@ -60,7 +60,7 @@ bool pending() {
     return poll(&p, 1, 0) > 0 && (p.revents & POLLIN);
 }
 
-enum Key { K_UP = 1000, K_DOWN, K_LEFT, K_RIGHT, K_HOME, K_END, K_DEL, K_WLEFT, K_WRIGHT };
+enum Key { K_UP = 1000, K_DOWN, K_LEFT, K_RIGHT, K_HOME, K_END, K_DEL, K_WLEFT, K_WRIGHT, K_WDEL };
 
 // After ESC. An Enter that follows is Enter, not part of a sequence (ESC, Enter swallowed the
 // Enter, audit R2-10).
@@ -69,6 +69,7 @@ int escape() {
     if (a == '\r' || a == '\n') return a;
     if (a == 'b') return K_WLEFT;
     if (a == 'f') return K_WRIGHT;
+    if (a == 'd') return K_WDEL;
     if (a != '[' && a != 'O') return -2;
     int b = read_key();
     if (b == '\r' || b == '\n') return b;
@@ -438,6 +439,7 @@ bool Editor::read(const std::string& prompt, std::string& result) {
     std::string saved;
     size_t pw = visible_width(prompt);
     bool tabbed = false;
+    std::string killed;  // the last text cut by Ctrl-K, Ctrl-U, Ctrl-W or Alt-D; Ctrl-Y puts it back
 
     auto draw = [&] {
         // A line with control bytes (a file name from Tab, an entry from history) is shown with
@@ -511,8 +513,12 @@ bool Editor::read(const std::string& prompt, std::string& result) {
                 while (pos < buf.size() && buf[pos] == ' ') ++pos;
                 while (pos < buf.size() && buf[pos] != ' ') ++pos;
                 break;
-            case 11: buf.erase(pos); break;  // Ctrl-K
-            case 21:                         // Ctrl-U
+            case 11:  // Ctrl-K
+                if (pos < buf.size()) killed = buf.substr(pos);
+                buf.erase(pos);
+                break;
+            case 21:  // Ctrl-U
+                if (pos > 0) killed = buf.substr(0, pos);
                 buf.erase(0, pos);
                 pos = 0;
                 break;
@@ -520,8 +526,38 @@ bool Editor::read(const std::string& prompt, std::string& result) {
                 size_t p = pos;
                 while (p > 0 && buf[p - 1] == ' ') --p;
                 while (p > 0 && buf[p - 1] != ' ') --p;
+                if (p < pos) killed = buf.substr(p, pos - p);
                 buf.erase(p, pos - p);
                 pos = p;
+                break;
+            }
+            case K_WDEL: {  // Alt-D: the word after the cursor
+                size_t p = pos;
+                while (p < buf.size() && buf[p] == ' ') ++p;
+                while (p < buf.size() && buf[p] != ' ') ++p;
+                if (p > pos) killed = buf.substr(pos, p - pos);
+                buf.erase(pos, p - pos);
+                break;
+            }
+            case 25:  // Ctrl-Y: what was cut last
+                buf.insert(pos, killed);
+                pos += killed.size();
+                break;
+            case 20: {  // Ctrl-T: swap the characters around the cursor (before it at the end of the line)
+                if (buf.empty() || pos == 0) break;
+                if (pos == buf.size()) pos = prev_char(buf, pos);
+                if (pos == 0) break;
+                size_t a = prev_char(buf, pos), b = next_char(buf, pos);
+                buf = buf.substr(0, a) + buf.substr(pos, b - pos) + buf.substr(a, pos - a) + buf.substr(b);
+                pos = b;
+                break;
+            }
+            case 22: {  // Ctrl-V: the next key is text, as it is
+                int q = read_key();
+                if (q >= 0) {
+                    buf.insert(pos, 1, char(q));
+                    ++pos;
+                }
                 break;
             }
             case 12: out("\x1b[H\x1b[2J"); break;  // Ctrl-L
@@ -592,16 +628,28 @@ bool Editor::read(const std::string& prompt, std::string& result) {
                     buf.replace(start, pos - start, p);
                     pos = start + p.size();
                 } else if (was_tab || c.size() > 1) {
-                    std::string list = "\r\n";
-                    size_t n = 0;
-                    for (auto& x : c) {
-                        if (n++ >= 100) {
-                            list += "...";
-                            break;
-                        }
-                        list += printable(x) + "  ";
+                    // In columns that fit the terminal, down the columns as bash; a long list shows
+                    // 100 names and says how many it left out (QA-RSH-72).
+                    const size_t shown = std::min<size_t>(c.size(), 100);
+                    std::vector<std::string> names;
+                    size_t w = 0;
+                    for (size_t i = 0; i < shown; ++i) {
+                        names.push_back(printable(c[i]));
+                        w = std::max(w, visible_width(names.back()));
                     }
-                    out(list + "\r\n");
+                    w += 2;
+                    const size_t per = std::max<size_t>(1, size_t(columns()) / w);
+                    size_t rows = (shown + per - 1) / per;
+                    std::string list = "\r\n";
+                    for (size_t r = 0; r < rows; ++r) {
+                        for (size_t i = r; i < shown; i += rows) {
+                            list += names[i];
+                            if (i + rows < shown) list += std::string(w - visible_width(names[i]), ' ');
+                        }
+                        list += "\r\n";
+                    }
+                    if (c.size() > shown) list += "... " + std::to_string(c.size() - shown) + " more\r\n";
+                    out(list);
                 }
                 tabbed = true;
                 break;
