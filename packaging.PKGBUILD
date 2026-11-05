@@ -21,7 +21,7 @@ noextract=("mruby-$_mruby_commit.tar.gz")
 # TODO(1.0.0): SKIP until v1.0.0 is tagged; then
 #   curl -fsSL https://github.com/wonderlandos/rsh/archive/refs/tags/v1.0.0.tar.gz | sha256sum
 # and put that hash in the first line below (and in rsh/PKGBUILD of wolos-pkgbuilds).
-sha256sums=('SKIP'
+sha256sums=('bba41681fa42489cc1230dae6e4a39e06ead5338480d0ab77290e5a9d450cbaf'
             'e4fb1bbad8276878e84e3c3b6161ac35a4216853de404f8463675aa2d1920b4f')
 
 build() {
