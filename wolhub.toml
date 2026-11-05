@@ -1,0 +1,13 @@
+# The hub's publisher manifest (https://hub.wolos.org, docs/WOLHUB-TOML.md in hub-worker).
+# The hub reads it at connect and at every release: this repository is an app, its release file is the .wol.
+# license: GitHub reports NOASSERTION for this repository; this line is what the hub lists (hub/Info.json says the same).
+schema = 1
+kind = "app"
+id = "wonderlandos.rsh"
+license = "GPL-2.0-or-later AND MIT"
+asset = "wonderlandos.rsh-*.wol"
+categories = ["Develop"]
+homepage = "https://github.com/wonderlandos/rsh"
+name = "RubyShell"
+summary = "Ruby that also runs command lines: one script for the logic and the commands"
+icon = "hub/icon.png"
