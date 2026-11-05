@@ -976,7 +976,8 @@ size_t utf8_bad(const char* s, size_t n, size_t* out, size_t cap) {
 // engine's: skip continuation bytes at the start; look behind at most `lookbehind` characters and
 // not over a bad one; the first piece ends at the next bad character (no end of line there); if it
 // does not match, each next piece (no start or end of line at its edges). A piece is passed as its
-// own subject, so \A and \G would match at its start: a pattern with them does not come here
+// own subject, so \A and \G would match at its start, and \z and \Z at its end (PCRE2 10.45 and
+// later match them at the end of the whole subject only): a pattern with them does not come here
 // (Re::frag).
 // `bad` is utf8_bad of the subject. The offsets in md are made absolute.
 int frag_match(const pcre2_code* code, const char* p, size_t len, size_t start, const size_t* bad, size_t nbad,
@@ -1144,11 +1145,16 @@ mrb_value m_re_init(mrb_state* mrb, mrb_value self) {
         pcre2_pattern_info(re->code, PCRE2_INFO_MAXLOOKBEHIND, &re->lookbehind);
         uint32_t nl = 0;
         pcre2_pattern_info(re->code, PCRE2_INFO_NEWLINE, &nl);
-        bool anchor = false;  // \A, \G: frag_match passes a piece as the subject
+        // \A, \G: frag_match passes a piece as the subject, so they would match at its start. \z, \Z:
+        // since PCRE2 10.45 ("\z was misbehaving when matching fragments inside invalid UTF strings")
+        // the engine matches them only at the end of the whole subject, not at the end of a piece
+        // before a bad byte, which a piece passed as the subject cannot tell. All four take the
+        // engine's own invalid-UTF path (Re::inv).
+        bool anchor = false;
         const char* sp = RSTRING_PTR(src);
         for (mrb_int i = 0; i + 1 < RSTRING_LEN(src); ++i)
             if (sp[i] == '\\') {
-                anchor |= sp[i + 1] == 'A' || sp[i + 1] == 'G';
+                anchor |= sp[i + 1] == 'A' || sp[i + 1] == 'G' || sp[i + 1] == 'z' || sp[i + 1] == 'Z';
                 ++i;
             }
         re->frag = nl == PCRE2_NEWLINE_LF && !anchor;

@@ -5,6 +5,14 @@
 QA-100 registry check (rows QA-RSH-24..76, written against 0.1.3): every row but those below was
 already fixed or decided in 0.1.4 and 0.9.x. Each fix below has a test that fails on 0.9.1.
 
+- **IMAGE-FIX-1 (package check)** `make test` failed on Arch with pcre2 10.49: `tests/unit_regexp.cpp:185`, 44 of
+  1,364,844 checks, every one `\z` or `\Z` (`/\z/`, `/\Z/`, with `i`) on a subject that ends in a bad UTF-8 byte (`"b\x80"`,
+  `"x\x80日 \x80\xed\xa0\x80日\xe6\x97"`). Since PCRE2 10.45 ("\z was misbehaving when matching fragments inside invalid
+  UTF strings") the engine matches `\z` and `\Z` at the end of the whole subject only; `frag_match` matched them at the
+  end of the valid piece before the bad byte. A pattern with `\z` or `\Z` now goes the engine's own way for an invalid
+  subject, as one with `\A` or `\G` did (`Re::frag`). Result: `"ab\xFF" =~ /b\z/` is `nil` (it was 1), as the engine
+  says; the goldens follow. Needs pcre2 10.45 or later (`depends` in the package).
+  `tests/unit_regexp.cpp`, `tests/golden/regexp_semantics.out`.
 - **QA-RSH-45 (audit L-7)** `echo -E` was printed as text: `-E` now turns the escapes off and a flag group of
   `n`, `e` and `E` is read as in bash (`-nE`, `-eE`; the last of e and E wins). `echo -e` keeps the
   backslash of an escape it does not know (`\q`, `\x` with no hex digit), as bash; it dropped it.

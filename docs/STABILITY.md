@@ -115,7 +115,8 @@ The texts after the place may be made clearer in a minor version; the shape abov
 - The interpreter: the commit and sha256 in `Makefile` (`MRUBY_COMMIT`, `MRUBY_SHA256`).
 - What is compiled into it: the gem list and the defines in `build_config.rb` (`MRB_UTF8_STRING`,
   `MRB_STR_LENGTH_MAX=0`, `MRB_ARY_LENGTH_MAX=0`, `MRB_NO_IO_POPEN`).
-- The only other library: pcre2 (8-bit), with a match limit of 1,000,000, a depth limit of 1,000,000
+- The only other library: pcre2 (8-bit, 10.45 or later: `\z` and `\Z` on a subject with invalid UTF-8 follow
+  the engine, which changed there), with a match limit of 1,000,000, a depth limit of 1,000,000
   and a heap limit of 256 MB per match (`src/rt.cpp`); no JIT.
 - Link mode: `LINK=static` (the default; the CI artifact) is one file with no shared libraries.
   The WolOS package (`packaging.PKGBUILD`) ships `LINK=dynamic`: glibc and libpcre2-8 shared, the C++

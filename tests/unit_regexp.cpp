@@ -138,9 +138,10 @@ int main() {
         if (failures > 20) break;
     }
 
-    // frag_match against the engine's own invalid-UTF matching (patterns with \\A or \\G do not go
-    // through it: a piece passed as the subject moves where they match).
-    const char* pats[] = {".", "\\w+", "\\b\\w", "^", "$", "^\\w", "\\w$", "\\z", "\\Z", "", "a|", "(?<=a)b",
+    // frag_match against the engine's own invalid-UTF matching (patterns with \\A, \\G, \\z or \\Z do
+    // not go through it: a piece passed as the subject moves where they match, and PCRE2 10.45 and
+    // later match \\z and \\Z at the end of the whole subject only; Re::frag in src/rt.cpp).
+    const char* pats[] = {".", "\\w+", "\\b\\w", "^", "$", "^\\w", "\\w$", "", "a|", "(?<=a)b",
                           "(?<=ab)c", "(?<!a)b", "(?=b)", "\\B", "[^a]", "\\X", "(a)?(b)", "x*", "\\s", "\xC3\xA9",
                           "\xE6\x97\xA5", "^a$", "a.b", "(?s).", "\\p{L}+", "(?<=\\w{2})x", "b\\b",
                           "\\n", "^$", "(?i)\xC3\x89", "[\\x{80}-\\x{10FFFF}]", ".{2}", "(?<=^)a", "(?<=\\n)\\w",

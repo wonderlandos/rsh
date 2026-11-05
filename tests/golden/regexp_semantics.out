@@ -172,7 +172,7 @@ NilClass
 9
 7
 3
-1
+nil
 14
 99
 7
@@ -181,5 +181,5 @@ NilClass
 ["ab"]
 []
 nil
-["a"]
+[]
 status: 0
