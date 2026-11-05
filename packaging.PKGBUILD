@@ -9,7 +9,7 @@ pkgdesc='Ruby with a shell layer: a script interpreter for shell scripts written
 arch=(x86_64)
 url='https://github.com/wonderlandos/rsh'
 license=(GPL-2.0-or-later MIT)   # MIT: the built-in interpreter
-depends=(glibc pcre2)
+depends=(glibc 'pcre2>=10.45')   # \z and \Z on invalid UTF-8 follow the engine from 10.45 (docs/STABILITY.md)
 makedepends=(ruby ruby-rake bison gcc make)   # ruby and rake run the interpreter's build script only (minirake execs rake)
 checkdepends=(procps-ng)   # tests/golden/sec_m5_jobs.rsh counts zombies with ps
 options=(!debug)

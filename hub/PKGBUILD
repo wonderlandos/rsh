@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The payload of the WolOS Hub file (wonderlandos.rsh-<version>.wol): rsh built from this checkout (the tagged
+# commit), not from a downloaded tarball. Built by .github/workflows/hub-release.yml in an Arch container:
+#   HUB_VERSION=0.9.1-1 makepkg -f  (in hub/; the tag v0.9.1-1 gives pkgver 0.9.1, pkgrel 1)
+# packaging.PKGBUILD stays the recipe of the [wolos] package; this one only differs in where the source comes from
+# and in carrying the hub's Info.json, as every .wol payload does (docs/modules/packages.md).
+pkgname=rsh
+pkgver=${HUB_VERSION%-*}
+pkgrel=${HUB_VERSION##*-}
+pkgdesc='Ruby with a shell layer: a script interpreter for shell scripts written in Ruby'
+arch=(x86_64)
+url='https://github.com/wonderlandos/rsh'
+license=(GPL-2.0-or-later MIT)
+depends=(glibc pcre2)
+makedepends=(ruby ruby-rake bison gcc make)
+options=(!debug)
+_mruby_commit=831da26b9021de0369d17b71b5667e2941a1a32d
+source=("mruby-$_mruby_commit.tar.gz::https://github.com/mruby/mruby/archive/$_mruby_commit.tar.gz")
+noextract=("mruby-$_mruby_commit.tar.gz")
+sha256sums=('e4fb1bbad8276878e84e3c3b6161ac35a4216853de404f8463675aa2d1920b4f')
+
+_src() { echo "${HUB_SRC:-$startdir/..}"; }
+
+build() {
+  make -C "$(_src)" LINK=dynamic MRUBY_TARBALL="$srcdir/mruby-$_mruby_commit.tar.gz"
+}
+package() {
+  make -C "$(_src)" LINK=dynamic MRUBY_TARBALL="$srcdir/mruby-$_mruby_commit.tar.gz" install DESTDIR="$pkgdir" PREFIX=/usr
+  install -Dm644 "$(_src)/build/mruby/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE.interpreter"
+  install -Dm644 "$(_src)/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  # The app record the system reads (wol list): the same bytes as the .wol's Info.json.
+  install -Dm644 "$(_src)/dist/Info.json" "$pkgdir/usr/share/wolos/packages/wonderlandos.rsh/Info.json"
+}

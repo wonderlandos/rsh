@@ -476,6 +476,15 @@ std::vector<std::string> complete(const std::string& line, size_t start) {
     while (b > 0 && (line[b - 1] == ' ' || line[b - 1] == '\t')) --b;
     bool first = b == 0 || std::strchr("|;&(", line[b - 1]);
     if (b >= 2 && line.compare(b - 2, 2, "$ ") == 0) first = true;
+    // `$HO` offers the environment variables that begin so (QA-RSH-52).
+    if (word.size() > 1 && word[0] == '$' && word.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_", 1) == std::string::npos) {
+        for (char** e = environ; e && *e; ++e) {
+            const char* eq = std::strchr(*e, '=');
+            std::string name = eq ? std::string(*e, size_t(eq - *e)) : std::string(*e);
+            if (!name.compare(0, word.size() - 1, word, 1, std::string::npos)) c.insert("$" + name);
+        }
+        if (!c.empty()) return std::vector<std::string>(c.begin(), c.end());
+    }
     if (first && word.find('/') == std::string::npos) {
         for (const char* b : {"cd", "pushd", "popd", "dirs", "export", "unset", "exec", "umask", "jobs", "fg", "bg", "wait",
                               "source", "echo", "type", "pwd", "history"})

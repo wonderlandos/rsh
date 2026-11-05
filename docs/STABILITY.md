@@ -115,7 +115,8 @@ The texts after the place may be made clearer in a minor version; the shape abov
 - The interpreter: the commit and sha256 in `Makefile` (`MRUBY_COMMIT`, `MRUBY_SHA256`).
 - What is compiled into it: the gem list and the defines in `build_config.rb` (`MRB_UTF8_STRING`,
   `MRB_STR_LENGTH_MAX=0`, `MRB_ARY_LENGTH_MAX=0`, `MRB_NO_IO_POPEN`).
-- The only other library: pcre2 (8-bit), with a match limit of 1,000,000, a depth limit of 1,000,000
+- The only other library: pcre2 (8-bit, 10.45 or later: `\z` and `\Z` on a subject with invalid UTF-8 follow
+  the engine, which changed there), with a match limit of 1,000,000, a depth limit of 1,000,000
   and a heap limit of 256 MB per match (`src/rt.cpp`); no JIT.
 - Link mode: `LINK=static` (the default; the CI artifact) is one file with no shared libraries.
   The WolOS package (`packaging.PKGBUILD`) ships `LINK=dynamic`: glibc and libpcre2-8 shared, the C++
@@ -129,13 +130,13 @@ Changing any of these is a major version; `tests/contract.sh` holds their digest
 A release is tagged only when, on the build machine:
 
 1. `make test` is green. It runs the unit checks, every golden and example, `tests/contract.sh`,
-   the doctrine and size check (under 3 MB) and the interactive checks, then builds `make asan`
+   the doctrine and size check (under 3.4 MiB, the release toolchain's limit) and the interactive checks, then builds `make asan`
    (`LINK=dynamic`, `-fsanitize=address,undefined`, leak check on) and runs the unit checks, every
    golden (the audit reproducers among them: `tests/golden/sec_*.rsh`) and the contract on it. Any
    sanitizer report fails the run. (`make test SANITIZE=0` leaves the sanitizer half out for a host
    without the sanitizer libraries; such a run is not a release gate.)
 2. `make bench` shows start-up within 5% of the previous release (median of 400 runs of
-   `rsh -c nil`), and the size under 3 MB.
+   `rsh -c nil`), and the size under 3.4 MiB.
 3. `CHANGELOG.md` names every change; `VERSION`, `packaging.PKGBUILD` (`pkgver`, and its sha256 once
    the tag exists) agree (`tests/contract.sh` checks the first three).
 4. (0.9.0) `make fuzz FUZZ_SECONDS=1800` (on a machine with clang) ends with no crash, no time-out and no

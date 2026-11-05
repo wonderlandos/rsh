@@ -177,7 +177,7 @@ sudo make install            # /usr/local/bin/rsh and its manual page
 
 On WolOS: `wol pkg -- -S rsh`. `wol script run|check|on` then accepts `.rsh` and `.rb` files.
 
-The result is one program, under 3 MB, that starts in about 1.2 ms.
+The result is one program, about 3 MB (3.0 to 3.3 MB, by compiler), that starts in about 1.2 ms.
 
 ## Run
 

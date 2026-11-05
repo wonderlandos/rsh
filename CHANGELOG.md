@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+QA-100 registry check (rows QA-RSH-24..76, written against 0.1.3): every row but those below was
+already fixed or decided in 0.1.4 and 0.9.x. Each fix below has a test that fails on 0.9.1.
+
+- **IMAGE-FIX-1 (package check)** `make test` failed on Arch with pcre2 10.49: `tests/unit_regexp.cpp:185`, 44 of
+  1,364,844 checks, every one `\z` or `\Z` (`/\z/`, `/\Z/`, with `i`) on a subject that ends in a bad UTF-8 byte (`"b\x80"`,
+  `"x\x80日 \x80\xed\xa0\x80日\xe6\x97"`). Since PCRE2 10.45 ("\z was misbehaving when matching fragments inside invalid
+  UTF strings") the engine matches `\z` and `\Z` at the end of the whole subject only; `frag_match` matched them at the
+  end of the valid piece before the bad byte. A pattern with `\z` or `\Z` now goes the engine's own way for an invalid
+  subject, as one with `\A` or `\G` did (`Re::frag`). Result: `"ab\xFF" =~ /b\z/` is `nil` (it was 1), as the engine
+  says; the goldens follow. Needs pcre2 10.45 or later (`depends` in the package).
+  `tests/unit_regexp.cpp`, `tests/golden/regexp_semantics.out`.
+- **QA-RSH-45 (audit L-7)** `echo -E` was printed as text: `-E` now turns the escapes off and a flag group of
+  `n`, `e` and `E` is read as in bash (`-nE`, `-eE`; the last of e and E wins). `echo -e` keeps the
+  backslash of an escape it does not know (`\q`, `\x` with no hex digit), as bash; it dropped it.
+  `tests/golden/qa_echo_flags.rsh`.
+- **QA-RSH-72** Tab with many candidates lists them in columns that fit the terminal (down the columns, as
+  bash), 100 at most and then `... N more`; it was one wrapped line. `tests/interactive.rb`.
+- **QA-RSH-71** Ctrl-T (swap), Alt-D (cut the next word), Ctrl-Y (put back the last cut of Ctrl-K, Ctrl-U,
+  Ctrl-W or Alt-D) and Ctrl-V (the next key is text). `tests/interactive.rb`.
+- **QA-RSH-52** Tab after `$TER` completes environment variables. `tests/interactive.rb`.
+- **QA-RSH-51** `jobs -l` and `jobs -p` (pids); another option is status 2. `tests/golden/qa_jobs_hints.rsh`.
+- **QA-RSH-54** `read`, `local`, `declare`, `typeset`, `shopt`, `let`, when not programs on `PATH`, say in the
+  `command not found` what to write. `tests/golden/qa_jobs_hints.rsh`.
+- **QA-RSH-57** (not reproduced) a new history file made in a pty session is 0600: pinned by `tests/interactive.rb`.
+
+- **Size gate** `tests/doctrine.sh` limits the program to 3.4 MiB (3,565,158 bytes), not 3 MiB: the 0.9.1 source
+  is 3,011,400 bytes with Ubuntu's gcc and 3,284,720 with Arch's, so `make test` failed on the release toolchain.
+  `docs/rsh.md` ("Size gate").
+
 ## 0.9.1
 
 ### Audit 2

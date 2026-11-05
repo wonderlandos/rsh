@@ -1,0 +1,3 @@
+rsh: jobs: -q: invalid option (jobs [-l|-p])
+rsh: local: command not found (local is sh: a Ruby variable in a method is already local)
+rsh: declare: command not found (declare is sh: a Ruby variable in a method is already local)

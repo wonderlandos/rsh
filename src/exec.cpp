@@ -52,6 +52,16 @@ struct Job {
 };
 std::vector<Job> jobs;
 
+// A word that is a builtin of sh and bash but not of rsh, when it is not on PATH either: say what to
+// write (QA-RSH-54). Only the message of a command that was not found changes.
+std::string sh_builtin_hint(const std::string& w) {
+    if (w == "read") return " (read is sh: write line = gets)";
+    if (w == "local" || w == "declare" || w == "typeset") return " (" + w + " is sh: a Ruby variable in a method is already local)";
+    if (w == "shopt" || w == "setopt") return " (" + w + " is bash: rsh has no shell options; relaxed! turns off raising)";
+    if (w == "let") return " (let is sh: write the arithmetic in Ruby, n += 1)";
+    return "";
+}
+
 void say(int fd, const std::string& s) {
     size_t o = 0;
     while (o < s.size()) {
@@ -543,7 +553,8 @@ bool spawn(Stage& st, int in, int out, int err_to, pid_t pgid, Host& h, std::str
         struct stat sb;
         bool there = st.argv[0].find('/') != std::string::npos && stat(st.argv[0].c_str(), &sb) == 0;
         std::string m = "rsh: " + st.argv[0] + ": " +
-                        (there ? (S_ISDIR(sb.st_mode) ? "Is a directory" : std::strerror(EACCES)) : "command not found") + "\n";
+                        (there ? (S_ISDIR(sb.st_mode) ? "Is a directory" : std::strerror(EACCES)) : "command not found") +
+                        (there ? "" : sh_builtin_hint(st.argv[0])) + "\n";
         say(err_to >= 0 ? err_to : 2, m);
         st.tail = m;
         st.status = there ? 126 : 127;
@@ -1326,11 +1337,16 @@ int run_builtin(const std::vector<std::string>& a, Host& h, const Env& env) {
     if (n == "echo") {
         size_t k = 1;
         bool nl = true, esc = false;
-        while (k < a.size() && (a[k] == "-n" || a[k] == "-e" || a[k] == "-ne" || a[k] == "-en")) {
-            if (a[k].find('n') != std::string::npos) nl = false;
-            if (a[k].find('e') != std::string::npos) esc = true;
-            ++k;
-        }
+        // A word of n, e and E after a `-` is a flag group, as bash: `-E` turns -e off and the last
+        // of the two wins (`-eE`); any other word (`-x`, `-`) is text (audit L-7).
+        auto flags = [](const std::string& w) {
+            return w.size() > 1 && w[0] == '-' && w.find_first_not_of("neE", 1) == std::string::npos;
+        };
+        for (; k < a.size() && flags(a[k]); ++k)
+            for (size_t i = 1; i < a[k].size(); ++i) {
+                if (a[k][i] == 'n') nl = false;
+                else esc = a[k][i] == 'e';
+            }
         std::string out;
         for (size_t j = k; j < a.size(); ++j) {
             if (j > k) out += ' ';
@@ -1361,9 +1377,14 @@ int run_builtin(const std::vector<std::string>& a, Host& h, const Env& env) {
                         ++d;
                     }
                     out += char(v);
-                } else
+                } else if (c && std::strchr("nt\\erabfv", c))
                     out += c == 'n' ? '\n' : c == 't' ? '\t' : c == '\\' ? '\\' : c == 'e' ? '\033' : c == 'r' ? '\r'
-                         : c == 'a' ? '\a' : c == 'b' ? '\b' : c == 'f' ? '\f' : c == 'v' ? '\v' : c;
+                         : c == 'a' ? '\a' : c == 'b' ? '\b' : c == 'f' ? '\f' : '\v';
+                else {
+                    // An escape echo does not know keeps its backslash (`\q` is `\q`), as bash.
+                    out += '\\';
+                    out += c;
+                }
             }
         }
         if (nl) out += '\n';
@@ -1385,9 +1406,23 @@ int run_builtin(const std::vector<std::string>& a, Host& h, const Env& env) {
         return emit("type", out) ? 1 : rc;
     }
     if (n == "jobs") {
+        // -p lists the process group leader of each job, -l puts it after the number (QA-RSH-51).
+        bool pids_only = false, with_pid = false;
+        for (size_t k = 1; k < a.size(); ++k) {
+            if (a[k] == "-p") pids_only = true;
+            else if (a[k] == "-l") with_pid = true;
+            else {
+                complain("jobs: " + a[k] + ": invalid option (jobs [-l|-p])");
+                return 2;
+            }
+        }
         report_jobs();
-        for (auto& j : jobs)
-            say(1, "[" + std::to_string(j.id) + "]  " + (j.done ? "Done" : j.stopped ? "Stopped" : "Running") + "  " + j.text + "\n");
+        for (auto& j : jobs) {
+            if (pids_only) say(1, std::to_string(j.pgid) + "\n");
+            else
+                say(1, "[" + std::to_string(j.id) + "]  " + (with_pid ? std::to_string(j.pgid) + "  " : "") +
+                           (j.done ? "Done" : j.stopped ? "Stopped" : "Running") + "  " + j.text + "\n");
+        }
         jobs.erase(std::remove_if(jobs.begin(), jobs.end(), [](const Job& x) { return x.done; }), jobs.end());
         return 0;
     }
