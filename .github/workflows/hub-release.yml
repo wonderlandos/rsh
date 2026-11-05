@@ -10,10 +10,10 @@ permissions:
   contents: write
 jobs:
   hub:
-    # Pinned to wonderlandos/hub 4e6f01f (wol-release.yml and tools/wolpack); move both pins together.
-    uses: wonderlandos/hub/.github/workflows/wol-release.yml@4e6f01f6599950f3a0b13ce93da8f0f4e4ead7b4
+    # Pinned to wonderlandos/hub aef80b2 (wol-release.yml and tools/wolpack); move both pins together.
+    uses: wonderlandos/hub/.github/workflows/wol-release.yml@aef80b2a3b8e13cd6f47f8525f423fc031c8b563
     with:
-      tools_ref: 4e6f01f6599950f3a0b13ce93da8f0f4e4ead7b4
+      tools_ref: aef80b2a3b8e13cd6f47f8525f423fc031c8b563
       kind: app
       id: wonderlandos.rsh
       makedepends: ruby ruby-rake bison pcre2
