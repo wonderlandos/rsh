@@ -3,7 +3,7 @@
 # interpreter built in. Builds the tagged release of github.com/wonderlandos/rsh; the same text
 # is the `rsh` package of wolos-pkgbuilds.
 pkgname=rsh
-pkgver=0.9.1
+pkgver=1.0.0
 pkgrel=1
 pkgdesc='Ruby with a shell layer: a script interpreter for shell scripts written in Ruby'
 arch=(x86_64)
@@ -11,14 +11,17 @@ url='https://github.com/wonderlandos/rsh'
 license=(GPL-2.0-or-later MIT)   # MIT: the built-in interpreter
 depends=(glibc 'pcre2>=10.45')   # \z and \Z on invalid UTF-8 follow the engine from 10.45 (docs/STABILITY.md)
 makedepends=(ruby ruby-rake bison gcc make)   # ruby and rake run the interpreter's build script only (minirake execs rake)
-checkdepends=(procps-ng)   # tests/golden/sec_m5_jobs.rsh counts zombies with ps
+checkdepends=(procps-ng strace)   # sec_m5_jobs.rsh counts zombies with ps; tests/race.sh traces Sh.rm_rf (skipped without strace)
 options=(!debug)
 _mruby_commit=831da26b9021de0369d17b71b5667e2941a1a32d
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
         "mruby-$_mruby_commit.tar.gz::https://github.com/mruby/mruby/archive/$_mruby_commit.tar.gz")
 noextract=("mruby-$_mruby_commit.tar.gz")
 # The release tarball's sha256 is written here once the v$pkgver tag exists (docs/STABILITY.md, release gate 3).
-sha256sums=('9fc0ebe7ea331286219e8128ab5ea2ddc6b899c3cb1c38b9c427b7bab56c8424'
+# TODO(1.0.0): SKIP until v1.0.0 is tagged; then
+#   curl -fsSL https://github.com/wonderlandos/rsh/archive/refs/tags/v1.0.0.tar.gz | sha256sum
+# and put that hash in the first line below (and in rsh/PKGBUILD of wolos-pkgbuilds).
+sha256sums=('SKIP'
             'e4fb1bbad8276878e84e3c3b6161ac35a4216853de404f8463675aa2d1920b4f')
 
 build() {

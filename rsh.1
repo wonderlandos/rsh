@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: GPL-2.0-or-later
-.TH RSH 1 "November 2026" "rsh 0.9" "WolOS"
+.TH RSH 1 "November 2026" "rsh 1.0" "WolOS"
 .SH NAME
 rsh \- Ruby with command lines: a script interpreter
 .SH SYNOPSIS
@@ -140,9 +140,15 @@ runs the block for each line. A String replaces the line, nil or false drops it,
 The status of a pipeline is the last one that failed.
 .TP
 .B "> >> < 2> 2>> 2>&1 &> <<<"
-Redirects. A file name written as
+Redirects, and
+.B >|
+(the same as
+.BR > ;
+there is no noclobber). A file name written as
 .B #{path}
-is one word.
+is one word. Another descriptor is one digit (\fB3>file\fR); a number of two digits or
+.B {name}>file
+is a mistake that says to quote it.
 .TP
 .B "<<WORD  <<~WORD  <<'WORD'"
 Here-documents. The first and second take
@@ -522,6 +528,32 @@ rsync \-a build/ #{dest}/
 errors = `journalctl \-b \-p err`.lines.reject { |l| l =~ /fwupd/ }
 puts "#{errors.size} errors" unless errors.empty?
 .fi
+.SH COMPATIBILITY
+Since 1.0 the language, the options, the exit statuses, the shape of the messages and the names
+and parameters of
+.B Sh
+(and of the
+.BR FileUtils ,
+.BR Find ,
+.B Shellwords
+and
+.B Dir.mktmpdir
+built in) are frozen: a script that works on 1.0 works on every 1.x with the same output and
+statuses. Only a 2.0 changes them. Nothing is deprecated. A 1.x may add
+.B Sh
+helpers and options, methods of the built-in Ruby, options of
+.BR rsh ,
+a meaning for the syntax that is a mistake today (a descriptor above 9 such as
+.BR 10>f ,
+.BR {fd}>f ,
+.BR <&\- ,
+.BR >&\- ,
+.BR N<<< ),
+clearer message text and new
+.B \-\-lint
+warnings. The interactive editing is not part of the promise. The full list is
+.I docs/COMPAT-1.0.md
+in the source.
 .SH SEE ALSO
 .BR wol (1),
 .BR sh (1),

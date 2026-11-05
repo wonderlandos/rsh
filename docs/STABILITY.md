@@ -5,8 +5,10 @@ serious security problem, a large speed-up or a large missing function, and for 
 the items below are frozen: a script, a program that reads rsh's output, or a package that builds it can
 depend on them. Changing any of them is a major version (2.0); a minor or patch version only fixes
 mistakes and adds things that do not change these. `tests/contract.sh` fails when one of them changes;
-`make test` runs it. 0.9.0 is the release candidate for 1.0: section 11 is the 1.0 contract (all its
-items met), section 10 the gaps found for it, section 12 the measured numbers.
+`make test` runs it. 1.0.0 (2026-11-05) is the first stable release: section 11 is the 1.0 contract (all
+its items met), section 10 the gaps found for it, section 12 the measured numbers, and
+[COMPAT-1.0.md](COMPAT-1.0.md) says in one page what is frozen, what is deprecated (nothing) and what a
+1.x may add.
 
 What rsh is for (the lead's scope, 2026-11-04): running scripts, as `bash` runs `.sh` files. `rsh FILE`,
 `#!/usr/bin/rsh`, `-c`, a script on standard input, its arguments, exit statuses, signals, pipelines,
@@ -130,13 +132,14 @@ Changing any of these is a major version; `tests/contract.sh` holds their digest
 A release is tagged only when, on the build machine:
 
 1. `make test` is green. It runs the unit checks, every golden and example, `tests/contract.sh`,
-   the doctrine and size check (under 3.4 MiB, the release toolchain's limit) and the interactive checks, then builds `make asan`
+   the doctrine and size check (under 3.4 MiB, the release toolchain's limit), the interactive checks, the
+   signal checks (`tests/signals.rb`) and the `Sh.rm_rf` link-swap check (`tests/race.sh`, with `strace`), then builds `make asan`
    (`LINK=dynamic`, `-fsanitize=address,undefined`, leak check on) and runs the unit checks, every
    golden (the audit reproducers among them: `tests/golden/sec_*.rsh`) and the contract on it. Any
    sanitizer report fails the run. (`make test SANITIZE=0` leaves the sanitizer half out for a host
    without the sanitizer libraries; such a run is not a release gate.)
 2. `make bench` shows start-up within 5% of the previous release (median of 400 runs of
-   `rsh -c nil`), and the size under 3.4 MiB.
+   `rsh -c nil`; the baseline is the last tagged release, 0.9.2 for 1.0), and the size under 3.4 MiB.
 3. `CHANGELOG.md` names every change; `VERSION`, `packaging.PKGBUILD` (`pkgver`, and its sha256 once
    the tag exists) agree (`tests/contract.sh` checks the first three).
 4. (0.9.0) `make fuzz FUZZ_SECONDS=1800` (on a machine with clang) ends with no crash, no time-out and no
@@ -206,25 +209,53 @@ first weeks, **P3** rarely. Each fix has a test that fails on 0.1.4 and passes o
 
 ### Audit 2 of v0.9.0 (fixed in 0.9.1; CHANGELOG.md "Audit 2")
 
-H1-H3, M1-M12 and the Lows L3, L7, L8, L9, L10, L14, L15, L16 are fixed or decided, each with a test.
-Left as documented limits:
+H1-H3, M1-M12 and the Lows L3, L7, L8, L9, L10, L14, L15, L16 were fixed or decided in 0.9.1, each with a
+test. The other Lows: L1, L2, L12 and L13 stay as documented behaviour; L4, L5, L6 and L11 were decided and
+fixed for 1.0:
 
 - **L1** `$*` must be a whole word (`"$*"`, `x$*` are `Rsh::Error`); join in Ruby: `#{ARGV.join(" ")}`.
 - **L2** `~nosuchuser` is `Rsh::Error` (sh keeps the text).
-- **L4** a redirect's descriptor is one digit (`10>f` is the word `10` and `>f`); `>|`, `<&-`, `>&-`
-  and `N<<<` are reader errors (status 2).
-- **L5** `exit N` or a signal inside a `source`d file ends that file and is reported as `source exited
-  N` (the status is right).
-- **L6** `$$` is a command-line word; in Ruby write `Process.pid`.
-- **L11** the D1 message for a redirect that cannot open is rsh's own and goes to rsh's standard error,
-  not through the command's `2>`.
+- **L4** (1.0) a redirect's descriptor is one digit; `10>f` and `{fd}>f` are reader errors that say to
+  quote the number or the braces (they were the word plus `>f`, silently); `>|` is `>`; `<&-`, `>&-`
+  and `N<<<` are reader errors (status 2). All reserved for a 1.x (COMPAT-1.0.md section 5).
+- **L5** (1.0, fixed) `exit N` or a signal inside a `source`d file ends the script, as in sh, with no
+  `source exited N` after it (cli "1.0-L5", `tests/signals.rb`).
+- **L6** (1.0, fixed) `$$` in Ruby is rsh's process id (cli "1.0-L6").
+- **L11** (1.0, fixed) the D1 message for a redirect that cannot open goes where the redirects before it sent
+  standard error (`cat 2>/dev/null < missing` is silent, as in sh); cli "1.0-L11".
 - **L12** `-n` and `--lint` messages are `FILE:LINE: TEXT` without `rsh: ` (section 5), also for
   `BEGIN not supported`.
-- **L13** 0.1.4 (commit 199bcc3) was never tagged; it is the comparison baseline of sections 10-12.
+- **L13** 0.1.4 (commit 199bcc3) was never tagged; it is the comparison baseline of sections 10-12 up to
+  0.9.1; from 1.0 the baseline is the tag v0.9.2.
+
+### Audit 2 closed for 1.0 (each row run again on the 1.0 code; "fails on 0.9.0" = run against a binary built from the v0.9.0 tag)
+
+| row | test | fails on 0.9.0 |
+|---|---|---|
+| H1 INT to rsh alone while a command runs | `tests/signals.rb` (5 cases) | yes, 5 of 5 |
+| H2 INT trap and IGNORE on Ctrl-C | `tests/signals.rb` (3 cases) | yes, 2 of 3 (no trap: 130, as before) |
+| H3 the reader after `&&`/`\|\|` | `golden/r91_andor.rsh` with `.explain` | yes |
+| M1 signals inside `at_exit` | `tests/signals.rb` (2 cases) | yes, 2 of 2 |
+| M2 a failed capture raises (decided) | `golden/r91_audit.rsh` | yes (the text was missing; behaviour unchanged) |
+| M3 bare `wait` | `golden/r91_audit.rsh` | yes |
+| M4 `source DIR` | `golden/r91_audit.rsh` | yes |
+| M5 symlinked script | cli "A2-M5" | yes |
+| M6 `Sh.cp` error text | `golden/r91_audit.rsh` | yes |
+| M7 FIFO and device in `cp`, `cp_r` | `golden/r91_audit.rsh` | yes |
+| M8 `Sh.mv` across file systems | cli "A2-M8" | yes |
+| M9 `rm_rf` walk | `tests/race.sh` (system calls; link swap) | yes: the system-call check every time, the swap about one run in three |
+| M10 limits | cli "A2-M10", K3 | documentation fix, passes on both |
+| M11 `#{...}` first on a line | cli "A2-M11" | yes |
+| M12 `FileUtils.mv` list onto a file | `golden/r91_audit.rsh` | yes |
+| L3 L7 L8 L9 L10 L14 L15 L16 | `golden/r91_audit.rsh`, cli "A2-L3", "A2-L7", `tests/signals.rb` | yes |
+| L4 (1.0) two-digit and `{fd}` descriptors, `>|` | cli "1.0-L4" | yes |
+| L6 (1.0) `$$` in Ruby | cli "1.0-L6" | yes |
+| L11 (1.0) the D1 message and `2>` before the failing redirect | cli "1.0-L11" | yes, 2 of 3 cases |
+| L5 (1.0) `exit` and signals inside `source` | cli "1.0-L5", `tests/signals.rb` (3 cases) | yes, 3 of 3 signal cases, 2 of 3 cli cases |
 
 ## 11. The 1.0 contract
 
-1.0 is tagged when every item below is met; 0.9.0 meets the ones marked **met**.
+1.0 is tagged when every item below is met; every one is **met** in 1.0.0.
 
 1. **Syntax and semantics frozen; `docs/design.md` is the specification and every rule has a golden
    test.** Met: `docs/design.md` is the specification (S1-S8), each numbered rule names its test,
@@ -232,7 +263,7 @@ Left as documented limits:
    decisions D1-D3, `r9_sh.rsh` every built-in helper, and `tests/frozen.explain` freezes how every
    test script and example is read (`--explain`, file by file; 0.9.0 reads all 70 exactly as 0.1.4 does:
    D3 only adds method names from a file that exists when the script is read).
-2. **Zero known open bugs.** Met: everything found is fixed (G1-G13, M1, D1-D3) or a documented limit
+2. **Zero known open bugs.** Met: everything found is fixed (G1-G13, M1, D1-D3, audit 2 H1-H3 and M1-M12) or a documented limit
    (K1-K8).
 3. **One hour of the sanitizer run and a fuzz of the reader clean; no memory growth in a 10,000-input
    session; start-up under 5 ms.** Met (numbers in section 12).
@@ -252,7 +283,7 @@ Left as documented limits:
    block is in no test script), and so are the manual page's (`tests/examples/doc_man.rsh`, and its
    "Sh" example, checked line for line against `tests/examples/doc_sh.rsh`).
 
-## 12. Stability numbers (0.9.0)
+## 12. Stability numbers (0.9.0 to 1.0.0)
 
 Measured on the AWS build box (32 cores, x86_64), 2026-11-04, with other jobs running (load about 14).
 
@@ -285,6 +316,18 @@ Measured on the AWS build box (32 cores, x86_64), 2026-11-04, with other jobs ru
   **10 + 20 rounds, 27,000 corpus runs, 0 problems**; `make test` with the sanitizer half and the new
   `tests/signals.rb` green. Start-up `rsh -c nil`, 1,500 runs interleaved with v0.9.0 in both orders:
   2,101-2,119 us against 2,030-2,041 us (+3.5-3.8%, inside the 5% gate); size 3,003,208 bytes.
+- **1.0.0 (2026-11-05)**, release container (Arch, gcc 16.2.1, pcre2 10.49) and a 32-core build box loaded by other jobs
+  (load 10-25):
+  `make test` green with the sanitizer half: 255 unit checks, 2,117,153 Regexp checks, 174 golden/example/cli
+  cases (173 on the sanitizer build: the M1 memory case is left out there), 72 contract checks, 44 interactive,
+  14 signal and 2 `Sh.rm_rf` race checks, the bench gate. Size 3,284,680 bytes (limit 3,565,158; 3,011,400 with
+  Ubuntu's gcc). **Fuzz of the reader**: 1,801 s with 6 workers on the 0.9.2 reader, 8,099,895 inputs, then
+  901 s with 6 workers on the 1.0.0 reader (the `10>f` and `{fd}>f` checks) from the merged corpus (5,173
+  inputs), 6,893,768 inputs: 14,993,663 inputs, **0 crashes, 0 time-outs (5 s), 0 out-of-memory (2 GB), 0
+  sanitizer reports**; 3,115 edges, peak RSS 590 MB. Start-up `rsh -c nil`, 800 runs each interleaved with
+  v0.9.2 in both orders: 1.996 and 1.982 ms against 1.986 and 1.991 ms (inside the 5% gate), size unchanged.
+  **Sanitizer hour** (`tests/soak.sh`, the Arch container, the final 1.0.0 code, the 5,173-input corpus the fuzz
+  grew): 05:24-06:26, **118 rounds, 106,200 corpus runs, 0 problems** (no failure, report, time-out or signal).
 - **Memory**: a 10,000-command session through a pseudo-terminal (six kinds of input in turn: a command,
   Ruby, `true`, a redirect, a capture, a block): RSS 2,960 KB after 1,000 commands, 3,592 KB after
   10,000 (+632 KB, history included; 0.1.4: +4,364 KB, and +6,140 KB for 10,000 `echo hi > /dev/null`).

@@ -344,7 +344,8 @@ struct CmdParser {
                 r.dupfd = s[i++] - '0';
                 c.redirs.push_back(r);
                 return true;
-            } else r.k = Redir::Out, ++i;
+            } else if (i + 1 < lim && s[i + 1] == '|') r.k = Redir::Out, i += 2;  // >| : no noclobber in rsh (1.0)
+            else r.k = Redir::Out, ++i;
         } else {  // '<'
             r.fd = fd < 0 ? 0 : fd;
             if (s.compare(i, 3, "<<<") == 0) {
@@ -474,6 +475,20 @@ struct CmdParser {
                 ++i;
                 if (!redirect(c, ch - '0')) return false;
                 continue;
+            }
+            if (std::isdigit((unsigned char)ch) && std::isdigit((unsigned char)nx) && c.words.size() + c.env.size() > 0) {
+                // 10>f: a descriptor above 9 is not supported (1.0, audit 2 L4); it was the word 10 and >f
+                size_t d = i;
+                while (d < lim && std::isdigit((unsigned char)s[d])) ++d;
+                if (d < lim && (s[d] == '>' || s[d] == '<'))
+                    return fail("a descriptor above 9 is not supported (10>f); quote the number ('10') to pass it as a word");
+            }
+            if (ch == '{' && c.words.size() + c.env.size() > 0 && ident_start(nx)) {
+                // {fd}>f: bash's named descriptor is not supported (1.0); it was the word {fd} plus >f
+                size_t d = i + 1;
+                while (d < lim && ident_char(s[d])) ++d;
+                if (d + 1 < lim && s[d] == '}' && (s[d + 1] == '>' || s[d + 1] == '<'))
+                    return fail("{name}>f (a named descriptor) is not supported; quote the braces ('{name}') to pass them as a word");
             }
             if (ch == '(' || ch == ')') {
                 if (after_andor && ch == '(' && c.words.empty())

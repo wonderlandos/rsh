@@ -168,7 +168,7 @@ ok "Rsh.last_pid" [ "$("$rsh" -c 'p Rsh.last_pid')" = nil ]
 ver=$(cat "$top/VERSION")
 ok "rsh -v is VERSION" [ "$("$rsh" -v)" = "rsh $ver" ]
 ok "packaging.PKGBUILD pkgver is VERSION" grep -qx "pkgver=$ver" "$top/packaging.PKGBUILD"
-ok "CHANGELOG.md has a section for VERSION" grep -qx "## $ver" "$top/CHANGELOG.md"
+ok "CHANGELOG.md has a section for VERSION" grep -Eq "^## $ver( \\(.*\\))?\$" "$top/CHANGELOG.md"
 
 # 5 (0.9.0): a script on standard input is named "-" in messages, as a file is.
 ok "stdin script: rsh: -:LINE: PROG exited N" err_is "rsh: -:1: sh exited 3" sh -c "printf 'sh -c \"exit 3\"\n' | \"$rsh\""

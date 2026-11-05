@@ -167,8 +167,8 @@ puts down.empty? ? "all up" : "down: #{down.join(", ")}"
 From the release source (needs a C++20 compiler, `make`, `bison`, `ruby` and `pcre2`; `ruby` is only used while building):
 
 ```sh
-curl -fsSLO https://github.com/wonderlandos/rsh/archive/refs/tags/v0.9.1.tar.gz
-tar -xzf v0.9.1.tar.gz && cd rsh-0.9.1
+curl -fsSLO https://github.com/wonderlandos/rsh/archive/refs/tags/v1.0.0.tar.gz
+tar -xzf v1.0.0.tar.gz && cd rsh-1.0.0
 make && make test
 sudo make install            # /usr/local/bin/rsh and its manual page
 ```
@@ -177,7 +177,7 @@ sudo make install            # /usr/local/bin/rsh and its manual page
 
 On WolOS: `wol pkg -- -S rsh`. `wol script run|check|on` then accepts `.rsh` and `.rb` files.
 
-The result is one program, about 3 MB (3.0 to 3.3 MB, by compiler), that starts in about 1.2 ms.
+The result is one program, about 3 MB (3.0 to 3.3 MB, by compiler), that starts in about 2 ms (1.98 ms for `rsh -c nil`, median of 800 runs, on a busy 32-core build box).
 
 ## Run
 
@@ -244,13 +244,13 @@ end
 
 ## Status
 
-rsh 0.9.0 is the release candidate for 1.0 (with `Sh`, the shell things as Ruby values: `Sh.find("logs", name: "*.log")`, `Sh.rm_rf`, `Sh.tmpdir { }`, and `FileUtils`, `Find`, `Shellwords` built in; [docs/rsh.md](docs/rsh.md)), a version that then changes only for a serious security problem, a large speed-up or a large missing function. [docs/design.md](docs/design.md) is the specification (every rule names its test) and [docs/STABILITY.md](docs/STABILITY.md) the contract: what is frozen (every 1.0 item is met), the known limits and the measured numbers (a 30-minute fuzz of the reader and an hour of the sanitizer build, both clean; no memory growth over 10,000 commands; start-up about 2 ms). Not done yet:
+rsh 1.0.0 (2026-11-05) is the first stable release. From here it changes for a serious security problem, a large speed-up or a large missing function, and for nothing else: [docs/COMPAT-1.0.md](docs/COMPAT-1.0.md) says in one page what is frozen (the language, the flags, the exit statuses, the messages and `Sh`), that nothing is deprecated, and what a 1.x may add. [docs/design.md](docs/design.md) is the specification (every rule names its test) and [docs/STABILITY.md](docs/STABILITY.md) the contract: the known limits and the measured numbers (a 30-minute fuzz of the reader and an hour of the sanitizer build, both clean; two audits with every High and Medium row closed and tested; no memory growth over 10,000 commands; start-up about 2 ms). Things to know:
 
 - The Ruby inside rsh is a smaller Ruby: no sockets (use `curl`, `ssh` or `wol`), no big or rational numbers, and `require` knows only `json`, `set`, `time`, `etc`, `fileutils`, `find`, `shellwords` and `tmpdir` (built in); your own files load with `require_relative`.
 - Ctrl-Z, `fg` and `bg` work but are not yet covered by the terminal test.
 - Packages exist for x86_64 only.
 
-Full description: [docs/rsh.md](docs/rsh.md). Specification: [docs/design.md](docs/design.md); the first design and the options weighed: [docs/design-history.md](docs/design-history.md). Manual page: `man rsh` ([rsh.1](rsh.1)). Changes: [CHANGELOG.md](CHANGELOG.md). Brand: [docs/brand.md](docs/brand.md).
+Full description: [docs/rsh.md](docs/rsh.md). What 1.0 freezes: [docs/COMPAT-1.0.md](docs/COMPAT-1.0.md). Specification: [docs/design.md](docs/design.md); the first design and the options weighed: [docs/design-history.md](docs/design-history.md). Manual page: `man rsh` ([rsh.1](rsh.1)). Changes: [CHANGELOG.md](CHANGELOG.md). Brand: [docs/brand.md](docs/brand.md).
 
 ## Licence
 

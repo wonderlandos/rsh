@@ -1,4 +1,4 @@
-# rsh specification (1.0 candidate, 0.9.0)
+# rsh specification (1.0.0)
 
 This is what rsh does with a script. It is the reference for 1.0 (`docs/STABILITY.md`, section 11): a
 rule here changes only in a major version. Every rule names the tests that hold it; `tests/run.sh`
@@ -93,11 +93,12 @@ stage that failed (pipefail); `$?.statuses` has every stage; a writer ended by S
 stage does not fail the pipeline. A `|` at the end of a line continues on the next. Tests:
 `golden/pipes.rsh`, `golden/readme_pipeline.rsh`, `golden/r9_spec.rsh` (S2.6, S2.8).
 
-**S2.7 Redirections and here-documents.** `> >> < 2> 2>> 2>&1 &> <<<`, `N>` for another descriptor, in
-the order written; `> #{path}` takes one word. `<<EOF` and `<<~EOF` take `#{}` (a backslash only before
+**S2.7 Redirections and here-documents.** `> >> < 2> 2>> 2>&1 &> <<<`, `>|` (as `>`), `N>` for another
+descriptor N of one digit, in the order written (`10>f`, `{fd}>f`, `<&-`, `>&-` and `N<<<` are reader
+mistakes, status 2, reserved: cli "1.0-L4"); `> #{path}` takes one word. `<<EOF` and `<<~EOF` take `#{}` (a backslash only before
 `$`, a back-quote, `\` and a new line), `<<'EOF'` is literal; body lines are never classified. Tests:
-`golden/redirects.rsh`, `golden/heredoc.rsh`, `golden/r9_spec.rsh` (S2.7). A file that cannot be opened
-is a failed command, status 1 (S3).
+`golden/redirects.rsh`, `golden/heredoc.rsh`, `golden/r9_spec.rsh` (S2.7), cli "1.0-L4". A file that cannot be opened
+is a failed command, status 1 (S3); the reason goes where the redirects before it sent standard error (as in sh).
 
 **S2.8 Lists.** `a && b`, `a || b`, `a ; b`, `a &` (background). After `&&` or `||` the next word is
 read by the same rules as at the start of a statement (S1.3 rules 2-5, S1.4, S1.5; 0.9.1): a command,
@@ -142,7 +143,7 @@ formats".
 NAME` keeps a set NAME and is a mistake for one that is not set. `unset` checks the name. `umask` takes
 octal digits. `exec prog` replaces rsh (with only redirects it applies them to rsh). `source FILE WORDS`
 runs FILE in this process with ARGV = WORDS while it runs; a FILE that is a folder, a device or a
-FIFO is a mistake (status 1). `cd -- DIR` is `cd DIR`. `wait` waits for background jobs (`wait PID` for the job
+FIFO is a mistake (status 1); `exit` or a signal inside FILE ends the script, as in sh (1.0). `cd -- DIR` is `cd DIR`. `wait` waits for background jobs (`wait PID` for the job
 of that process, `wait %N` for job N, a plain number a pid first, else a job number; a bare `wait`
 waits for every job and fails with the first job, in start order, that failed; a job that is not there is 127). `Rsh.last_pid` is the pid of the
 last `cmd &` in Ruby, `nil` before the first. `echo`, `pwd` and `type` alone on a line run without a fork;

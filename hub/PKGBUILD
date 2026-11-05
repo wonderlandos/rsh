@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # The payload of the WolOS Hub file (wonderlandos.rsh-<version>.wol): rsh built from this checkout (the tagged
 # commit), not from a downloaded tarball. Built by .github/workflows/hub-release.yml in an Arch container:
-#   HUB_VERSION=0.9.1-1 makepkg -f  (in hub/; the tag v0.9.1-1 gives pkgver 0.9.1, pkgrel 1)
+#   HUB_VERSION=1.0.0-1 makepkg -f  (in hub/; the tag v1.0.0-1 gives pkgver 1.0.0, pkgrel 1)
 # packaging.PKGBUILD stays the recipe of the [wolos] package; this one only differs in where the source comes from
 # and in carrying the hub's Info.json, as every .wol payload does (docs/modules/packages.md).
 pkgname=rsh
@@ -11,7 +11,7 @@ pkgdesc='Ruby with a shell layer: a script interpreter for shell scripts written
 arch=(x86_64)
 url='https://github.com/wonderlandos/rsh'
 license=(GPL-2.0-or-later MIT)
-depends=(glibc pcre2)
+depends=(glibc 'pcre2>=10.45')
 makedepends=(ruby ruby-rake bison gcc make)
 options=(!debug)
 _mruby_commit=831da26b9021de0369d17b71b5667e2941a1a32d

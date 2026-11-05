@@ -24,6 +24,9 @@ File.write(File.join(dir, 'exit2.rsh'), <<~RSH)
   at_exit { puts "at_exit"; sleep 3; puts "at_exit end" }
   puts "main"
 RSH
+File.write(File.join(dir, 'lib_sleep.rsh'), "sleep 5\n")
+File.write(File.join(dir, 'src_sleep.rsh'), "source lib_sleep.rsh\nputs 'after'\n")
+File.write(File.join(dir, 'src_trap.rsh'), "trap('TERM') { puts 'trapped'; exit 7 }\nsource lib_sleep.rsh\nputs 'after'\n")
 failed = []
 checks = 0
 run = lambda do |label, sig, args, want_status, want_out, group: false|
@@ -63,6 +66,10 @@ run.call('M1 TERM inside at_exit: 143', 'TERM', ['exit2.rsh'], 143, "main\nat_ex
 run.call('M1 INT inside at_exit: 130', 'INT', ['exit2.rsh'], 130, "main\nat_exit\n")
 # unchanged: TERM to rsh alone
 run.call('TERM (pid) during sleep: 143', 'TERM', ['int1.rsh'], 143, "ensure ran\nat_exit ran\n")
+# L5 (1.0): a signal while a sourced file runs is the script's signal, with no "source exited N"
+run.call('L5 TERM during a sourced file: 143, no message', 'TERM', ['src_sleep.rsh'], 143, '')
+run.call('L5 INT (pid) during a sourced file: 130, no message', 'INT', ['src_sleep.rsh'], 130, '')
+run.call('L5 TERM during a sourced file with a trap: the trap runs', 'TERM', ['src_trap.rsh'], 7, "trapped\n")
 puts "signals: #{checks} checks, #{failed.size} failed"
 failed.each { |f| warn f }
 exit(failed.empty? ? 0 : 1)

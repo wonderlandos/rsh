@@ -37,6 +37,9 @@ struct Host {
     // `keep` false drops the line, else `out` is written (with a newline).
     virtual bool stage(int val, const std::string& line, std::string& out, bool& keep) = 0;
     virtual int source(const std::vector<std::string>& argv) = 0;
+    // True when the last `source` ended in `exit` or a signal: the host holds that exception and the
+    // line must raise it (1.0, audit 2 L5), not report "source exited N".
+    virtual bool raised() { return false; }
     virtual const std::vector<std::string>& args() = 0;
     virtual void history(int fd) = 0;
     virtual ~Host() = default;

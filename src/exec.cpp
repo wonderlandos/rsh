@@ -394,6 +394,15 @@ bool open_redirs(const Stage& st, std::vector<std::pair<int, int>>& map, std::ve
             err = r.target + ": " + std::strerror(errno);
             soft_failure = true;
             soft_argv = st.argv;
+            // The redirects before this one are in force, as in sh: `cat 2>/dev/null < missing` says
+            // nothing, `cat > out 2>&1 < missing` writes the reason to out (1.0, audit 2 L11).
+            int cur[3] = {-1, -1, -1};
+            for (auto& m : map)
+                if (m.first >= 0 && m.first <= 2) cur[m.first] = m.second >= 0 ? m.second : (-m.second - 1 <= 2 ? cur[-m.second - 1] : -1);
+            if (cur[2] >= 0) {
+                say(cur[2], "rsh: " + err + "\n");
+                soft_quiet = true;
+            }
             return false;
         }
         opened.push_back(f);
@@ -734,6 +743,7 @@ bool pipeline(const Item& it, const std::vector<Value>& vals, Host& h, const Opt
         pr.code = code;
         pr.statuses = {code};
         if (code) pr.failed = 0;
+        if (stages[0].argv[0] == "source" && h.raised()) oc.ruby_error = true;  // exit or a signal in the file
         return true;
     }
     bool tee = o.tee && !o.cond && !o.relaxed && !shell().interactive && !bg && r0 < 0;

@@ -64,6 +64,7 @@ struct RtHost : Host {
 
     bool stage(int val, const std::string& line, std::string& out, bool& keep) override;
     int source(const std::vector<std::string>& a) override;
+    bool raised() override { return !mrb_nil_p(exc); }
     const std::vector<std::string>& args() override { return argv; }
     void history(int fd) override {
         for (size_t k = 0; k < hist.size(); ++k) {
@@ -787,6 +788,13 @@ int RtHost::source(const std::vector<std::string>& a) {
                 std::fprintf(stderr, "rsh: %s:%s%s\n", a[1].c_str(), m.c_str() + 5, ruby_word_hint(body, std::atoi(m.c_str() + 5)).c_str());
                 return 2;
             }
+        }
+        // `exit` or a signal inside the file ends the script, as in sh: the line raises it again
+        // (1.0, audit 2 L5; it was reported as a failed command, "source exited N")
+        if (MRB_EXC_EXIT_P(mrb_obj_ptr(e)) || mrb_obj_is_kind_of(mrb, e, mrb_class_get(mrb, "SignalException"))) {
+            exc = e;
+            mrb_gc_register(mrb, exc);
+            return 0;
         }
         int st = report(mrb, e);
         return st ? st : 1;
@@ -1992,6 +2000,7 @@ mrb_state* rt_open(const std::string& script, const std::vector<std::string>& ar
     mrb_define_global_const(mrb, "ARGV", av);
     mrb_gv_set(mrb, mrb_intern_lit(mrb, "$0"), str(mrb, script));
     mrb_gv_set(mrb, mrb_intern_lit(mrb, "$PROGRAM_NAME"), str(mrb, script));  // L-5
+    mrb_gv_set(mrb, mrb_intern_lit(mrb, "$$"), mrb_int_value(mrb, (mrb_int)getpid()));  // 1.0, audit 2 L6: rsh's pid, as sh's $$ (a forked stage keeps it; Process.pid is the live one)
     mrb_gv_set(mrb, mrb_intern_lit(mrb, "$*"), av);
     return mrb;
 }

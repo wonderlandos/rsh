@@ -1,6 +1,64 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 (2026-11-05)
+
+The first stable release. Nothing in the language, the flags, the statuses, the messages or `Sh`
+changes from 0.9.2 except the items under "Language" below (L4, L5, L6, L11: places where it did the wrong thing silently); what 1.0 freezes, what it deprecates
+and what a 1.x may add is [docs/COMPAT-1.0.md](docs/COMPAT-1.0.md).
+
+### Audit 2 closed
+
+Every High and Medium row of the audit of v0.9.0 (H1-H3, M1-M12) was fixed in 0.9.1. For 1.0 each
+one was run again on this code and the 1.0 tests were run against a v0.9.0 binary built from its
+tag: the tests of H1, H2, M1 (`tests/signals.rb`: 9 of 11 checks fail on v0.9.0), H3, M2-M4, M6, M7, M12
+(`golden/r91_andor.rsh`, `golden/r91_audit.rsh`: fail there, with their `.explain` and `.err` checks) and
+M5, M8, M11 (cli "A2-..." cases) fail there and pass here. One row had no deterministic test and now has
+one, and one is a documentation fix:
+
+- **M9** (`rm_rf` followed a folder swapped for a link: "read, not reproduced" in the audit)
+  `tests/race.sh` (new, in `make test`; needs `strace`, skipped without): the system calls of a
+  `Sh.rm_rf` walk are checked (openat with O_NOFOLLOW and O_DIRECTORY, unlinkat with AT_REMOVEDIR,
+  no path-based rmdir or unlink: fails on v0.9.0 every time), and a swap of a folder for a link
+  while `strace` holds each stat for 300 ms is repeated 10 times (v0.9.0 lost the protected file in
+  about one run in three; here never).
+- **M10** is a documentation fix (STABILITY K3, cli "A2-M10"); the numbers were measured again.
+
+### Language
+
+- **L6** (audit 2) `$$` in Ruby code is rsh's process id (it was `nil`; only the command-line word worked), so
+  `#{$$}` in a command line works. A stage forked for a Ruby block keeps the parent's number, as sh's
+  `$$` does in a subshell; `Process.pid` is always the live one. cli "1.0-L6".
+- **L11** (audit 2) The reason a redirect could not open goes where the redirects before it sent standard error,
+  as in sh: `cat 2>/dev/null < missing || :` says nothing, `cat 2>log < missing` writes it to `log`, `2>&1`
+  to a file too. Written after (`cat < missing 2>/dev/null`) it is still said, as sh does. cli "1.0-L11".
+- **L5** (audit 2) `exit N` (also `exit 0`) or a signal inside a `source`d file now ends the script, as in sh:
+  the line raises the exit or the signal again, so `ensure` and `at_exit` run and a trap block takes the
+  signal, and there is no `rsh: FILE:LINE: source exited N` after it. Before, the status was right for N
+  but the message was added, `exit 0` only ended the file, and the script went on. A Ruby error inside the
+  file is still a failed command that `source FILE || ...` can take. cli "1.0-L5", `tests/signals.rb`.
+- **L4** (audit 2, part of it) A descriptor above 9 (`cmd 10>f`) is a reader mistake (status 2)
+  that says to quote the number to pass it as a word; it used to be the word `10` plus `>f`, silently
+  wrong; `cmd {fd}>f` (bash's named descriptor) is a reader mistake too (it was the word `{fd}` plus
+  `>f`). `cmd >| file` is `cmd > file` (rsh has no noclobber). `<&-`, `>&-` and `N<<<` stay reader
+  errors. All of these are reserved: a 1.x may give them a meaning. cli "1.0-L4".
+
+### Lows of audit 2 left as documented behaviour (STABILITY section 10)
+
+L1 (`"$*"` in a word), L2 (`~nosuchuser` is an error: rsh keeps it as a decided safety choice), L12 (`-n` messages have no `rsh: `), L13 (0.1.4 was
+never tagged; the speed baseline is now 0.9.2).
+
+### Package and docs
+
+- `docs/COMPAT-1.0.md` (new): the frozen syntax and `Sh` surface, what is deprecated (nothing), what a
+  1.x may add and may not.
+- `packaging.PKGBUILD` and `hub/PKGBUILD`: pkgver 1.0.0; `hub/PKGBUILD` depends on `pcre2>=10.45` as the
+  package does (it was left at plain `pcre2`).
+- `tests/contract.sh` accepts `## VERSION (DATE)` as the changelog heading.
+- README "Status", `rsh.1` (version in the header, a COMPATIBILITY section), STABILITY sections 9-12.
+
+### Fixes of 0.9.2 that had no changelog heading
+
+(v0.9.2 was tagged with these under "Unreleased" and with `VERSION` still 0.9.1, so a v0.9.2 binary says `rsh 0.9.1`; they are in 0.9.2 and in this release.)
 
 QA-100 registry check (rows QA-RSH-24..76, written against 0.1.3): every row but those below was
 already fixed or decided in 0.1.4 and 0.9.x. Each fix below has a test that fails on 0.9.1.

@@ -280,6 +280,36 @@ if [ -d /dev/shm ] && [ -w /dev/shm ] && [ "$(stat -c %d /dev/shm)" != "$(stat -
 	cli "A2-M8: Sh.mv across file systems: a file and a folder" \
 		'(cd "$tmp/cli" && TMPDIR=/dev/shm "$rsh" -c "d = Sh.tmpdir; Sh.mv(\"mvsrc\", d); Sh.mv(\"mvdir\", d); p [File.read(\"#{d}/mvsrc\"), File.read(\"#{d}/mvdir/in/f\"), File.exist?(\"mvsrc\"), File.exist?(\"mvdir\")]; Sh.rm_rf(d)" 2>&1 | grep -qx "\[\"x\", \"y\", false, false\]")'
 fi
+# 1.0, audit 2 L4: a descriptor above 9 is said, not read as the word 10 plus a redirect; >| is >
+cli "1.0-L4: 10>f is a reader mistake (status 2) that says what to do; '10' and a quoted number stay words" \
+	'"$rsh" -c "echo hi 10>f" 2>&1 | grep -q "a descriptor above 9 is not supported" && ! "$rsh" -n -c "echo hi 10>f" >/dev/null 2>&1 && [ "$("$rsh" -c "echo hi 10 \"10>f\" 10")" = "hi 10 10>f 10" ]'
+cli "1.0-L4: {fd}>f (a named descriptor) is a reader mistake, '{fd}' and {a,b} stay words" \
+	'"$rsh" -c "echo x {fd}>f" 2>&1 | grep -q "a named descriptor) is not supported" && [ "$("$rsh" -c "echo x {a,b} \"{fd}\"")" = "x a b {fd}" ]'
+cli "1.0-L4: >| writes like > (rsh has no noclobber)" \
+	'(cd "$tmp/cli" && "$rsh" -c "echo a >| bar.txt; echo b >| bar.txt" && [ "$(cat bar.txt)" = b ])'
+# 1.0, audit 2 L5: exit inside a sourced file ends the script with that status and says nothing more
+# (it was "source exited N"; exit 0 there only ended the file); at_exit blocks run; an error that is
+# not an exit is still a failed command that a condition can take
+printf 'puts "in"\nexit 4\n' >"$tmp/cli/src_exit.rsh"
+printf 'raise "boom"\n' >"$tmp/cli/src_raise.rsh"
+cli "1.0-L5: exit N in a sourced file ends the script with N, without a message; at_exit runs" \
+	'(cd "$tmp/cli" && o=$("$rsh" -c "at_exit { puts :bye }; source src_exit.rsh; puts :after" 2>&1); [ $? = 4 ] && [ "$o" = "in
+bye" ])'
+cli "1.0-L5: exit 0 in a sourced file ends the script too (sh)" \
+	'(cd "$tmp/cli" && printf "exit 0\n" >src_exit0.rsh && o=$("$rsh" -c "source src_exit0.rsh; puts :after" 2>&1); [ $? = 0 ] && [ -z "$o" ])'
+cli "1.0-L5: a Ruby error in a sourced file is still a failed command a condition can take" \
+	'(cd "$tmp/cli" && [ "$("$rsh" -c "source src_raise.rsh 2>/dev/null || puts :taken" 2>/dev/null)" = taken ])'
+# 1.0, audit 2 L11: the redirects before a failing one are in force, as in sh, so the reason goes where
+# 2> was sent; written after the failing one, 2>/dev/null is too late (sh says it too)
+cli "1.0-L11: cat 2>/dev/null < missing || : says nothing" \
+	'[ -z "$("$rsh" -c "cat 2>/dev/null < /nonexistent/x || :" 2>&1)" ]'
+cli "1.0-L11: 2>FILE before the failing redirect gets the reason; 2>&1 to a file too" \
+	'(cd "$tmp/cli" && rm -f l11a l11b && [ -z "$("$rsh" -c "cat 2>l11a < /nonexistent/x || :; cat > l11b 2>&1 < /nonexistent/x || :" 2>&1)" ] && grep -q "^rsh: /nonexistent/x: " l11a && grep -q "^rsh: /nonexistent/x: " l11b)'
+cli "1.0-L11: 2>/dev/null written after the failing redirect is too late, as in sh" \
+	'"$rsh" -c "cat < /nonexistent/x 2>/dev/null || :" 2>&1 | grep -q "^rsh: /nonexistent/x: "'
+# 1.0, audit 2 L6: $$ in Ruby is rsh's process id, as the $$ word of a command line is
+cli "1.0-L6: \$\$ in Ruby is the process id (it was nil)" \
+	'[ "$("$rsh" -c "puts [\$\$ == Process.pid, \$\$.class].inspect")" = "[true, Integer]" ] && [ "$("$rsh" -c "echo #{\$\$}")" -gt 1 ]'
 # M1: a long interactive session does not grow (an arena slot and a string per input, the command
 # lines of every input kept: about 250 and 600 bytes a line). 20,000 inputs through -i, RSS after
 # 2,000 and after 20,000; under 1 MB of growth (0.1.4: about 7 MB; 0.9.0: about 0.3 MB).

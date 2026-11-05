@@ -114,6 +114,7 @@ test: $(OUT)/unit $(OUT)/unit_regexp $(OUT)/rsh
 	sh tests/doctrine.sh $(OUT)/rsh
 	@if command -v ruby >/dev/null; then ruby tests/interactive.rb $(OUT)/rsh; else echo 'interactive: ruby missing, skipped'; fi
 	@if command -v ruby >/dev/null; then ruby tests/signals.rb $(OUT)/rsh; else echo 'signals: ruby missing, skipped'; fi
+	sh tests/race.sh $(OUT)/rsh
 	sh bench/run.sh --gate $(OUT)/rsh
 ifeq ($(SANITIZE),1)
 	$(MAKE) --no-print-directory asan
@@ -137,7 +138,7 @@ bench: build/rsh
 	sh tests/bench.sh build/rsh
 	sh bench/run.sh build/rsh
 
-# The reader fuzz (docs/STABILITY.md, 0.9.0): tests/fuzz/reader.cpp under libFuzzer with the address
+# The reader fuzz (docs/STABILITY.md, 0.9.0, 1.0): tests/fuzz/reader.cpp under libFuzzer with the address
 # and undefined-behaviour sanitizers (needs clang). The seeds are every test script; findings go to
 # build/fuzz/crash-*. FUZZ_SECONDS=1800 is the release-gate run.
 FUZZ_SECONDS ?= 60
